@@ -1,0 +1,126 @@
+#!/usr/bin/python3
+"""Latch GO2 passive damping from a dedicated interactive terminal."""
+import os
+import select
+import sys
+import termios
+import time
+import tty
+
+import rclpy
+from geometry_msgs.msg import Twist
+from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from std_msgs.msg import Bool, Int32
+
+
+class EmergencyStopKeyboard(Node):
+    def __init__(self):
+        super().__init__('go2_estop_keyboard')
+        latched_qos = QoSProfile(depth=1)
+        latched_qos.reliability = ReliabilityPolicy.RELIABLE
+        latched_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
+        self.estop_pub = self.create_publisher(Bool, '/go2/emergency_stop', latched_qos)
+        self.zero_pub = self.create_publisher(Twist, '/cmd_vel', 10)
+        self.mode_pub = self.create_publisher(Int32, '/go2/control_mode', 10)
+        self.max_vx = abs(float(self.declare_parameter('max_vx', 0.10).value))
+        self.speed_step = abs(float(self.declare_parameter('speed_step', 0.02).value))
+        self.latched = False
+        self.rl_requested = False
+        self.vx = 0.0
+        self.pending_mode = 0
+        self.mode_until = 0.0
+
+    def trigger(self, reason):
+        if not self.latched:
+            self.latched = True
+            self.get_logger().fatal(
+                'EMERGENCY STOP TRIGGERED by %s: passive damping is latched; '
+                'restart real.launch.py to clear it' % reason)
+        self.publish_stop()
+
+    def publish_stop(self):
+        self.vx = 0.0
+        self.zero_pub.publish(Twist())
+        self.estop_pub.publish(Bool(data=True))
+
+    def request_mode(self, mode, description):
+        self.vx = 0.0
+        self.rl_requested = mode == 3
+        self.pending_mode = mode
+        self.mode_until = time.monotonic() + 1.0
+        self.get_logger().warning('Requested %s; commanded speed reset to zero' % description)
+
+    def handle_control_key(self, key):
+        if key == b'1':
+            self.request_mode(1, 'PASSIVE damping')
+        elif key == b'2':
+            self.request_mode(2, 'next fixed transition (down/stand)')
+        elif key == b'3':
+            self.request_mode(3, 'RL locomotion')
+        elif key in (b'x', b'X'):
+            self.vx = 0.0
+            self.get_logger().info('Commanded vx=0.00 m/s')
+        elif key in (b'w', b'W', b's', b'S'):
+            if not self.rl_requested:
+                self.get_logger().warning('Speed key ignored until key 3 requests RL locomotion')
+                return
+            direction = 1.0 if key in (b'w', b'W') else -1.0
+            self.vx = max(-self.max_vx, min(self.max_vx, self.vx + direction * self.speed_step))
+            self.get_logger().info('Commanded vx=%.2f m/s' % self.vx)
+
+    def publish_control(self):
+        command = Twist()
+        command.linear.x = self.vx
+        self.zero_pub.publish(command)
+        if self.pending_mode and time.monotonic() <= self.mode_until:
+            self.mode_pub.publish(Int32(data=self.pending_mode))
+        elif self.pending_mode:
+            self.pending_mode = 0
+
+
+def main():
+    if not sys.stdin.isatty():
+        print('go2_estop_keyboard requires its own interactive terminal', file=sys.stderr)
+        return 2
+
+    rclpy.init()
+    node = EmergencyStopKeyboard()
+    fd = sys.stdin.fileno()
+    original_terminal = termios.tcgetattr(fd)
+    node.get_logger().warning(
+        'GO2 keyboard control armed | SPACE/ESC: latched emergency damping | '
+        '1: passive | 2: down/stand transition | 3: RL | W/S: vx +/- | X: zero | '
+        'Ctrl+C: emergency stop then exit')
+    try:
+        tty.setcbreak(fd)
+        while rclpy.ok():
+            readable, _, _ = select.select([fd], [], [], 0.05)
+            if readable:
+                key = os.read(fd, 1)
+                if key in (b' ', b'\x1b'):
+                    names = {b' ': 'SPACE', b'\x1b': 'ESC'}
+                    node.trigger(names[key])
+                elif not node.latched:
+                    node.handle_control_key(key)
+            if node.latched:
+                node.publish_stop()
+            else:
+                node.publish_control()
+            rclpy.spin_once(node, timeout_sec=0.0)
+    except KeyboardInterrupt:
+        node.trigger('Ctrl+C')
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            node.publish_stop()
+            rclpy.spin_once(node, timeout_sec=0.02)
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, original_terminal)
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())
