@@ -1,0 +1,266 @@
+#!/usr/bin/env python3
+"""Transform a Building-local PCT route into odom and execute it as one mission."""
+
+import math
+import sys
+
+import rclpy
+from geometry_msgs.msg import PoseStamped, TransformStamped
+from nav_msgs.msg import Odometry, Path
+from rclpy.executors import ExternalShutdownException
+from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
+from std_msgs.msg import Bool
+from tf2_ros.static_transform_broadcaster import StaticTransformBroadcaster
+
+
+def yaw_from_quaternion(q):
+    return math.atan2(
+        2.0 * (q.w * q.z + q.x * q.y),
+        1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+
+
+def transform_xyz(local, odom, building, spawn):
+    """Building-local -> Gazebo world -> current FAST-LIO odom."""
+    lx, ly, lz = local
+    ox, oy, oz, odom_yaw = odom
+    bx, by, bz, building_yaw = building
+    sx, sy, sz, spawn_yaw = spawn
+
+    cb, sb = math.cos(building_yaw), math.sin(building_yaw)
+    world_x = bx + cb * lx - sb * ly
+    world_y = by + sb * lx + cb * ly
+    world_z = bz + lz
+
+    yaw = odom_yaw - spawn_yaw
+    c, s = math.cos(yaw), math.sin(yaw)
+    dx, dy = world_x - sx, world_y - sy
+    return (
+        ox + c * dx - s * dy,
+        oy + s * dx + c * dy,
+        oz + world_z - sz,
+    )
+
+
+class PctPathMission(Node):
+    def __init__(self):
+        super().__init__('pct_path_mission')
+        self.input_topic = str(self.declare_parameter(
+            'input_topic', '/pct_path_raw').value)
+        self.output_topic = str(self.declare_parameter(
+            'output_topic', '/pct_path').value)
+        self.goal_topic = str(self.declare_parameter(
+            'goal_topic', '/scan/goal').value)
+        self.odom_topic = str(self.declare_parameter(
+            'odom_topic', '/fast_lio/odometry_base').value)
+        self.ready_topic = str(self.declare_parameter(
+            'ready_topic', '/go2/demo_ready').value)
+        self.frame_id = str(self.declare_parameter('frame_id', 'odom').value)
+        self.pct_frame_id = str(self.declare_parameter(
+            'pct_frame_id', 'building_pct').value)
+        self.publish_map_tf = bool(self.declare_parameter(
+            'publish_map_tf', True).value)
+
+        self.building = (
+            float(self.declare_parameter('building_x', 13.0).value),
+            float(self.declare_parameter('building_y', 0.0).value),
+            float(self.declare_parameter('building_z', 0.0).value),
+            float(self.declare_parameter('building_yaw', 0.0).value),
+        )
+        self.spawn = (
+            float(self.declare_parameter('spawn_x', -27.0).value),
+            float(self.declare_parameter('spawn_y', 6.0).value),
+            float(self.declare_parameter('spawn_z', 0.50).value),
+            float(self.declare_parameter('spawn_yaw', 0.0).value),
+        )
+
+        latched = QoSProfile(depth=1)
+        latched.reliability = ReliabilityPolicy.RELIABLE
+        latched.durability = DurabilityPolicy.TRANSIENT_LOCAL
+        reliable = QoSProfile(depth=10)
+        reliable.reliability = ReliabilityPolicy.RELIABLE
+
+        self.path_pub = self.create_publisher(Path, self.output_topic, latched)
+        self.goal_pub = self.create_publisher(PoseStamped, self.goal_topic, reliable)
+        self.complete_pub = self.create_publisher(
+            Bool, '/scan/mission_complete', latched)
+        self.static_tf = StaticTransformBroadcaster(self)
+        self.create_subscription(Path, self.input_topic, self.on_path, latched)
+        self.create_subscription(
+            Odometry, self.odom_topic, self.on_odom, qos_profile_sensor_data)
+        self.create_subscription(Bool, self.ready_topic, self.on_ready, latched)
+        self.create_subscription(
+            PoseStamped, '/scan/goal_stop_ack', self.on_stop_ack, reliable)
+
+        self.raw_path = None
+        self.initial_odom = None
+        self.ready = False
+        self.started = False
+        self.completed = False
+        self.goal_stamp = None
+        self.map_tf_published = False
+        self.complete_pub.publish(Bool(data=False))
+        self.get_logger().info(
+            'Waiting for PCT path on %s and navigation readiness on %s' %
+            (self.input_topic, self.ready_topic))
+
+    def on_path(self, msg):
+        if len(msg.poses) < 2:
+            self.get_logger().error('Rejected PCT path with fewer than two poses')
+            return
+        values = [
+            (pose.pose.position.x, pose.pose.position.y, pose.pose.position.z)
+            for pose in msg.poses
+        ]
+        if not all(math.isfinite(value) for point in values for value in point):
+            self.get_logger().error('Rejected PCT path containing non-finite coordinates')
+            return
+        self.raw_path = msg
+        self.get_logger().info('Received Building-local PCT path with %d poses' %
+                               len(msg.poses))
+        self.start_if_ready()
+
+    def on_odom(self, msg):
+        if self.started:
+            return
+        p = msg.pose.pose.position
+        yaw = yaw_from_quaternion(msg.pose.pose.orientation)
+        values = (p.x, p.y, p.z, yaw)
+        if all(math.isfinite(value) for value in values):
+            self.initial_odom = values
+            self.start_if_ready()
+
+    def on_ready(self, msg):
+        self.ready = bool(msg.data)
+        self.start_if_ready()
+
+    def start_if_ready(self):
+        if self.started or not self.ready or self.raw_path is None or self.initial_odom is None:
+            return
+
+        stamp = self.get_clock().now().to_msg()
+        self.publish_map_transform(stamp)
+        transformed = Path()
+        transformed.header.frame_id = self.frame_id
+        transformed.header.stamp = stamp
+        points = []
+        for source in self.raw_path.poses:
+            local = (
+                source.pose.position.x,
+                source.pose.position.y,
+                source.pose.position.z,
+            )
+            points.append(transform_xyz(
+                local, self.initial_odom, self.building, self.spawn))
+
+        for index, point in enumerate(points):
+            pose = PoseStamped()
+            pose.header = transformed.header
+            pose.pose.position.x, pose.pose.position.y, pose.pose.position.z = point
+            if index + 1 < len(points):
+                dx = points[index + 1][0] - point[0]
+                dy = points[index + 1][1] - point[1]
+            else:
+                dx = point[0] - points[index - 1][0]
+                dy = point[1] - points[index - 1][1]
+            yaw = math.atan2(dy, dx)
+            pose.pose.orientation.z = math.sin(0.5 * yaw)
+            pose.pose.orientation.w = math.cos(0.5 * yaw)
+            transformed.poses.append(pose)
+
+        final_goal = PoseStamped()
+        final_goal.header = transformed.header
+        final_goal.pose = transformed.poses[-1].pose
+        self.goal_stamp = (stamp.sec, stamp.nanosec)
+
+        # Arm final-goal latching before SCAN can publish the first spline.
+        self.complete_pub.publish(Bool(data=False))
+        self.goal_pub.publish(final_goal)
+        self.path_pub.publish(transformed)
+        self.started = True
+
+        connector = math.dist(self.initial_odom[:3], points[0])
+        self.get_logger().info(
+            'PCT cross-floor mission started: connector=%.2f m, route_points=%d, '
+            'entrance=[%.2f %.2f %.2f], final=[%.2f %.2f %.2f]' %
+            (connector, len(points), *points[0], *points[-1]))
+
+    def publish_map_transform(self, stamp):
+        """Publish the same Building-local -> odom transform used by the route."""
+        if self.map_tf_published or not self.publish_map_tf:
+            return
+        origin = transform_xyz(
+            (0.0, 0.0, 0.0), self.initial_odom, self.building, self.spawn)
+        yaw = (self.initial_odom[3] - self.spawn[3]) + self.building[3]
+        transform = TransformStamped()
+        transform.header.stamp = stamp
+        transform.header.frame_id = self.frame_id
+        transform.child_frame_id = self.pct_frame_id
+        transform.transform.translation.x = origin[0]
+        transform.transform.translation.y = origin[1]
+        transform.transform.translation.z = origin[2]
+        transform.transform.rotation.z = math.sin(0.5 * yaw)
+        transform.transform.rotation.w = math.cos(0.5 * yaw)
+        self.static_tf.sendTransform(transform)
+        self.map_tf_published = True
+        self.get_logger().info(
+            'Published static map TF: %s -> %s, xyz=[%.2f %.2f %.2f], yaw=%.3f' %
+            (self.frame_id, self.pct_frame_id, *origin, yaw))
+
+    def on_stop_ack(self, msg):
+        if not self.started or self.completed or self.goal_stamp is None:
+            return
+        stamp = (msg.header.stamp.sec, msg.header.stamp.nanosec)
+        if stamp != self.goal_stamp:
+            return
+        self.completed = True
+        self.complete_pub.publish(Bool(data=True))
+        self.get_logger().info(
+            'PCT cross-floor mission complete; GO2 may return to fixed stand')
+
+
+def self_test():
+    # Default geometry: local entrance (-5.5,6) + Building x=13 gives
+    # Gazebo (7.5,6). Relative to spawn (-27,6), odom entrance is x=34.5.
+    result = transform_xyz(
+        (-5.5, 6.0, 0.558),
+        (0.0, 0.0, 0.50, 0.0),
+        (13.0, 0.0, 0.0, 0.0),
+        (-27.0, 6.0, 0.50, 0.0))
+    assert math.isclose(result[0], 34.5, abs_tol=1e-9)
+    assert math.isclose(result[1], 0.0, abs_tol=1e-9)
+    assert math.isclose(result[2], 0.558, abs_tol=1e-9)
+    rotated = transform_xyz(
+        (-5.5, 6.0, 0.5),
+        (1.0, 2.0, 0.5, math.pi / 2),
+        (13.0, 0.0, 0.0, 0.0),
+        (-27.0, 6.0, 0.5, 0.0))
+    assert math.isclose(rotated[0], 1.0, abs_tol=1e-9)
+    assert math.isclose(rotated[1], 36.5, abs_tol=1e-9)
+    print('PASS PCT Building-local -> selected navigation odom mission transform')
+
+
+def main():
+    if '--self-test' in sys.argv:
+        self_test()
+        return
+    rclpy.init()
+    node = PctPathMission()
+    try:
+        rclpy.spin(node)
+    except (KeyboardInterrupt, ExternalShutdownException):
+        pass
+    finally:
+        # ros2 launch may forward a second SIGINT while its children are
+        # already tearing down.  Treat that as an ordinary shutdown instead
+        # of printing a misleading traceback from destroy_node().
+        try:
+            node.destroy_node()
+            if rclpy.ok():
+                rclpy.shutdown()
+        except (KeyboardInterrupt, ExternalShutdownException):
+            pass
+
+
+if __name__ == '__main__':
+    main()
