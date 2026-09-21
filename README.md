@@ -11,6 +11,20 @@ English | [简体中文](README_CN.md) | [Technical analysis (Chinese)](docs/PRO
 
 Legbot is a ROS 2 Jazzy workspace for 3D navigation with the Unitree GO2. It connects LiDAR-inertial odometry, local and multi-floor planning, reinforcement-learning locomotion, Gazebo simulation, and a guarded GO2 EDU hardware interface in one launch structure.
 
+---
+Video：
+
+
+
+https://github.com/user-attachments/assets/a22cbeaa-1105-4142-913b-2253239482a1
+
+
+
+
+
+---
+
+
 ```text
 Unitree L1 / simulated LiDAR + IMU
                  │
