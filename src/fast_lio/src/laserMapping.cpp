@@ -33,6 +33,7 @@
 // ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 // POSSIBILITY OF SUCH DAMAGE.
 #include <omp.h>
+#include <atomic>
 #include <mutex>
 #include <math.h>
 #include <thread>
@@ -55,6 +56,7 @@
 #include <pcl/io/pcd_io.h>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <sensor_msgs/msg/imu.hpp>
+#include <std_msgs/msg/bool.hpp>
 #include <std_srvs/srv/trigger.hpp>
 #include <tf2_ros/transform_broadcaster.h>
 #include <geometry_msgs/msg/transform_stamped.hpp>
@@ -100,6 +102,7 @@ bool   point_selected_surf[100000] = {0};
 bool   lidar_pushed, flg_first_scan = true, flg_exit = false, flg_EKF_inited;
 bool   scan_pub_en = false, dense_pub_en = false, scan_body_pub_en = false;
 bool    is_first_lidar = true;
+std::atomic_bool lio_input_enabled{true};
 
 vector<vector<int>>  pointSearchInd_surf; 
 vector<BoxPointType> cub_needrm;
@@ -284,6 +287,7 @@ void lasermap_fov_segment()
 
 void standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::UniquePtr msg) 
 {
+    if (!lio_input_enabled.load(std::memory_order_acquire)) return;
     std::unique_lock<std::mutex> lock(mtx_buffer);
     scan_count ++;
     double cur_time = get_time_sec(msg->header.stamp);
@@ -318,6 +322,7 @@ double timediff_lidar_wrt_imu = 0.0;
 bool   timediff_set_flg = false;
 void livox_pcl_cbk(const livox_ros_driver2::msg::CustomMsg::UniquePtr msg) 
 {
+    if (!lio_input_enabled.load(std::memory_order_acquire)) return;
     std::unique_lock<std::mutex> lock(mtx_buffer);
     double cur_time = get_time_sec(msg->header.stamp);
     double preprocess_start_time = omp_get_wtime();
@@ -363,6 +368,7 @@ void livox_pcl_cbk(const livox_ros_driver2::msg::CustomMsg::UniquePtr msg)
 
 void imu_cbk(const sensor_msgs::msg::Imu::UniquePtr msg_in)
 {
+    if (!lio_input_enabled.load(std::memory_order_acquire)) return;
     publish_count ++;
     // cout<<"IMU got at: "<<msg_in->header.stamp.toSec()<<endl;
     sensor_msgs::msg::Imu::SharedPtr msg(new sensor_msgs::msg::Imu(*msg_in));
@@ -841,6 +847,8 @@ public:
         this->declare_parameter<string>("common.imu_topic", "/livox/imu");
         this->declare_parameter<bool>("common.time_sync_en", false);
         this->declare_parameter<double>("common.time_offset_lidar_to_imu", 0.0);
+        this->declare_parameter<bool>("common.wait_for_start", false);
+        this->declare_parameter<string>("common.start_topic", "/fast_lio/start");
         this->declare_parameter<double>("filter_size_corner", 0.5);
         this->declare_parameter<double>("filter_size_surf", 0.5);
         this->declare_parameter<double>("filter_size_map", 0.5);
@@ -880,6 +888,8 @@ public:
         this->get_parameter_or<string>("common.imu_topic", imu_topic,"/livox/imu");
         this->get_parameter_or<bool>("common.time_sync_en", time_sync_en, false);
         this->get_parameter_or<double>("common.time_offset_lidar_to_imu", time_diff_lidar_to_imu, 0.0);
+        const bool wait_for_start = this->get_parameter("common.wait_for_start").as_bool();
+        const string start_topic = this->get_parameter("common.start_topic").as_string();
         this->get_parameter_or<double>("filter_size_corner",filter_size_corner_min,0.5);
         this->get_parameter_or<double>("filter_size_surf",filter_size_surf_min,0.5);
         this->get_parameter_or<double>("filter_size_map",filter_size_map_min,0.5);
@@ -962,6 +972,28 @@ public:
         }
         sub_imu_ = this->create_subscription<sensor_msgs::msg::Imu>(
             imu_topic, rclcpp::SensorDataQoS(), imu_cbk);
+        lio_input_enabled.store(!wait_for_start, std::memory_order_release);
+        if (wait_for_start)
+        {
+            const auto start_qos = rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local();
+            sub_start_ = this->create_subscription<std_msgs::msg::Bool>(
+                start_topic, start_qos,
+                [this, start_topic](const std_msgs::msg::Bool::ConstSharedPtr msg)
+                {
+                    if (!msg->data) return;
+                    const bool was_enabled = lio_input_enabled.exchange(
+                        true, std::memory_order_acq_rel);
+                    if (!was_enabled)
+                    {
+                        RCLCPP_INFO(this->get_logger(),
+                                    "Stable-stand gate opened on %s; FAST-LIO now accepts LiDAR/IMU input.",
+                                    start_topic.c_str());
+                    }
+                });
+            RCLCPP_INFO(this->get_logger(),
+                        "Waiting for stable-stand signal on %s before accepting LiDAR/IMU input.",
+                        start_topic.c_str());
+        }
         pubLaserCloudFull_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered", 20);
         pubLaserCloudFull_body_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered_body", 20);
         pubLaserCloudEffect_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_effected", 20);
@@ -1175,6 +1207,7 @@ private:
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubOdomAftMapped_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pubPath_;
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr sub_imu_;
+    rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr sub_start_;
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_pcl_pc_;
     rclcpp::Subscription<livox_ros_driver2::msg::CustomMsg>::SharedPtr sub_pcl_livox_;
 

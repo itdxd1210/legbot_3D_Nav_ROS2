@@ -15,6 +15,8 @@ def generate_launch_description():
         DeclareLaunchArgument('odom_topic', default_value='/fast_lio/odometry_base'),
         DeclareLaunchArgument('cloud_topic', default_value='/fast_lio/cloud_registered'),
         DeclareLaunchArgument('localization_label', default_value='FAST-LIO'),
+        DeclareLaunchArgument('gate_fastlio_start', default_value='false', choices=['true', 'false']),
+        DeclareLaunchArgument('fastlio_start_topic', default_value='/fast_lio/start'),
         Node(
             package='legbot_bringup', executable='go2_demo_sequencer',
             name='go2_demo_sequencer', output='screen',
@@ -32,5 +34,9 @@ def generate_launch_description():
                     LaunchConfiguration('cloud_topic'), value_type=str),
                 'localization_label': ParameterValue(
                     LaunchConfiguration('localization_label'), value_type=str),
+                'gate_fastlio_start': ParameterValue(
+                    LaunchConfiguration('gate_fastlio_start'), value_type=bool),
+                'fastlio_start_topic': ParameterValue(
+                    LaunchConfiguration('fastlio_start_topic'), value_type=str),
             }]),
     ])

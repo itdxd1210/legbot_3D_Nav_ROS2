@@ -4,6 +4,7 @@ import math
 import time
 
 import rclpy
+from controller_manager_msgs.msg import ControllerManagerActivity
 from nav_msgs.msg import Odometry
 from rclpy.executors import ExternalShutdownException
 try:
@@ -31,7 +32,12 @@ class DemoSequencer(Node):
             'cloud_topic', '/fast_lio/cloud_registered').value)
         self.localization_label = str(self.declare_parameter(
             'localization_label', 'FAST-LIO').value)
-        self.joint_seen = self.odom_seen = self.cloud_seen = self.plan_seen = False
+        self.gate_fastlio_start = bool(self.declare_parameter(
+            'gate_fastlio_start', False).value)
+        self.fastlio_start_topic = str(self.declare_parameter(
+            'fastlio_start_topic', '/fast_lio/start').value)
+        self.joint_seen = self.controller_active = False
+        self.odom_seen = self.cloud_seen = self.plan_seen = False
         self.plan_ready_source_seen = False
         self.mission_complete = False
         self.state = 'waiting_for_joint_states'
@@ -43,6 +49,15 @@ class DemoSequencer(Node):
         latched.durability = DurabilityPolicy.TRANSIENT_LOCAL
         self.mode_pub = self.create_publisher(Int32, '/go2/control_mode', 10)
         self.ready_pub = self.create_publisher(Bool, '/go2/demo_ready', latched)
+        self.lio_start_pub = self.create_publisher(
+            Bool, self.fastlio_start_topic, latched)
+        if self.gate_fastlio_start:
+            self.lio_start_pub.publish(Bool(data=False))
+            self.get_logger().info(
+                'FAST-LIO input is gated until the fixed-stand settling period completes')
+        self.create_subscription(
+            ControllerManagerActivity, '/controller_manager/activity',
+            self.on_controller_activity, latched)
         self.create_subscription(JointState, '/joint_states', self.on_joint, qos_profile_sensor_data)
         self.create_subscription(
             Odometry, self.odom_topic, self.on_odom, qos_profile_sensor_data)
@@ -52,7 +67,8 @@ class DemoSequencer(Node):
         self.create_subscription(Bool, '/scan/plan_ready', self.on_plan_ready, latched)
         self.create_subscription(Bool, '/scan/mission_complete', self.on_complete, latched)
         self.create_timer(0.05, self.tick)
-        self.get_logger().info('Waiting for controller joint states')
+        self.get_logger().info(
+            'Waiting for controller joint states and active RL controller')
 
     def enter(self, state):
         self.state = state
@@ -60,6 +76,12 @@ class DemoSequencer(Node):
 
     def on_joint(self, msg):
         self.joint_seen = len(msg.name) >= 12 and len(msg.position) >= 12
+
+    def on_controller_activity(self, msg):
+        self.controller_active = any(
+            controller.name == 'rl_quadruped_controller'
+            and controller.state.id == 3
+            for controller in msg.controllers)
 
     def on_odom(self, msg):
         p = msg.pose.pose.position
@@ -102,8 +124,9 @@ class DemoSequencer(Node):
     def tick(self):
         elapsed = time.monotonic() - self.state_started
         if self.state == 'waiting_for_joint_states':
-            if self.joint_seen:
-                self.get_logger().info('Controller ready: requesting crouch transition')
+            if self.joint_seen and self.controller_active:
+                self.get_logger().info(
+                    'RL controller active with joint states: requesting crouch transition')
                 self.enter('first_stand_pulse')
         elif self.state == 'first_stand_pulse':
             self.publish_mode(2)
@@ -119,6 +142,10 @@ class DemoSequencer(Node):
                 self.enter('stand_wait')
         elif self.state == 'stand_wait':
             if elapsed >= self.stand_wait:
+                if self.gate_fastlio_start:
+                    self.lio_start_pub.publish(Bool(data=True))
+                    self.get_logger().info(
+                        'Fixed stand stable: releasing FAST-LIO LiDAR/IMU initialization')
                 self.enter('waiting_for_navigation_inputs')
         elif self.state == 'waiting_for_navigation_inputs':
             if self.odom_seen and self.cloud_seen:

@@ -6,6 +6,8 @@ import rclpy
 from rclpy.executors import ExternalShutdownException
 from rclpy.utilities import remove_ros_args
 from rclpy.qos import QoSProfile, DurabilityPolicy
+from rclpy.time import Time
+from tf2_ros import Buffer, TransformListener
 rclpy.init()
 node = rclpy.create_node('pct_planner')
 from nav_msgs.msg import Path
@@ -33,10 +35,15 @@ parser.add_argument('--start', type=float, nargs=3, metavar=('X', 'Y', 'Z'))
 parser.add_argument('--goal', type=float, nargs=3, metavar=('X', 'Y', 'Z'))
 parser.add_argument('--path-topic', default='/pct_path')
 parser.add_argument('--frame-id', default='building_pct')
+parser.add_argument('--display-frame', default='',
+                    help='RViz fixed frame for the one-time map-cloud republish')
 parser.add_argument('--optimize', action='store_true',
                     help='Use experimental GPMP optimization instead of the stable PCT A* route')
 args = parser.parse_args(remove_ros_args(sys.argv)[1:])
 
+display_frame = args.display_frame or args.frame_id
+display_tf_buffer = Buffer(node=node) if display_frame != args.frame_id else None
+display_tf_listener = TransformListener(display_tf_buffer, node) if display_tf_buffer else None
 cfg = Config()
 
 
@@ -76,7 +83,6 @@ last_planned_end_pos = None
 plan_timer = None
 cloud_timer = None
 map_cloud_messages = None
-cloud_wait_checks = 0
 PLAN_INTERVAL = 0.5  # 规划检查间隔（秒）
 
 
@@ -148,18 +154,19 @@ def republish_map_clouds():
 
 
 def publish_clouds_when_rviz_is_ready():
-    """Send one live copy after RViz matches, then stop the lightweight poll."""
-    global cloud_wait_checks
-    cloud_wait_checks += 1
+    """Send one live copy after RViz matches and its fixed-frame TF exists."""
     rviz_matched = (
         global_points_pub.get_subscription_count() > 0 and
         tomogram_pub.get_subscription_count() > 0)
-    if not rviz_matched and cloud_wait_checks < 40:
+    if not rviz_matched:
+        return
+    if display_tf_buffer is not None and not display_tf_buffer.can_transform(
+            display_frame, args.frame_id, Time()):
         return
     republish_map_clouds()
     cloud_timer.cancel()
     node.get_logger().info(
-        'PCT map cloud late-join publish complete: rviz_matched=%s' % rviz_matched)
+        'PCT map cloud late-join publish complete: display_frame=%s' % display_frame)
 
 
 def plan_callback():  # 关键修改：添加event参数接收TimerEvent
@@ -325,10 +332,8 @@ def pct_plan():
     planner.loadTomogram(tomo_file)
     publish_map_clouds()
     global cloud_timer
-    # Transient-local is normally sufficient.  Some DDS implementations do
-    # not replay multi-megabyte cached samples reliably, so poll only for a
-    # matching RViz subscriber and send one live copy.  Never stream these
-    # static clouds continuously: doing so steals CPU/DDS bandwidth from SCAN.
+    # The map clouds can precede the map-to-odom TF.  Send one live copy after
+    # RViz and that TF are ready, without streaming large static clouds.
     cloud_timer = node.create_timer(0.5, publish_clouds_when_rviz_is_ready)
 
     make6DofMarker(start_pos,"start_pos", show_6dof=True)

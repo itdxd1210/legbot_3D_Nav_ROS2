@@ -12,11 +12,11 @@ namespace scan_planner
     node = nh;
     nh.param("grid_map/frame_id", frame_id_, std::string("map"));
 
-    goal_point_pub = nh.advertise<visualization_msgs::msg::Marker>("goal_point", 2);
+    goal_point_pub = nh.advertise<visualization_msgs::msg::Marker>("goal_point", 1, true);
     manual_ground_goal_pub = nh.advertise<visualization_msgs::msg::Marker>("manual_ground_goal", 2, true);
     global_list_pub = nh.advertise<visualization_msgs::msg::Marker>("global_list", 2);
     init_list_pub = nh.advertise<visualization_msgs::msg::Marker>("init_list", 2);
-    optimal_list_pub = nh.advertise<visualization_msgs::msg::Marker>("optimal_list", 2);
+    optimal_list_pub = nh.advertise<visualization_msgs::msg::Marker>("optimal_list", 2, true);
     a_star_list_pub = nh.advertise<visualization_msgs::msg::Marker>("a_star_list", 20);
     local_target_pub = nh.advertise<visualization_msgs::msg::Marker>("local_target", 2, true);
     heading_vector_pub = nh.advertise<visualization_msgs::msg::Marker>("heading_vector", 2, true);
@@ -291,11 +291,6 @@ namespace scan_planner
 
   void PlanningVisualization::displayOptimalTraj(UniformBspline position_traj, int id)
   {
-    if (optimal_list_pub.getNumSubscribers() == 0)
-    {
-      return;
-    }
-
     const double duration = position_traj.getTimeSum();
     if (duration < 1e-6)
     {
@@ -359,6 +354,20 @@ namespace scan_planner
     optimal_list_pub.publish(sphere);
     optimal_list_pub.publish(line_strip);
   }
+
+  void PlanningVisualization::clearLocalPlan(bool clear_goal)
+  {
+    visualization_msgs::msg::Marker marker;
+    marker.header.frame_id = frame_id_;
+    marker.header.stamp = legbot::Time::now();
+    marker.action = visualization_msgs::msg::Marker::DELETEALL;
+    optimal_list_pub.publish(marker);
+    local_target_pub.publish(marker);
+    heading_vector_pub.publish(marker);
+    if (clear_goal)
+      goal_point_pub.publish(marker);
+  }
+
 
   void PlanningVisualization::displayAStarList(std::vector<std::vector<Eigen::Vector3d>> a_star_paths, int id /* = Eigen::Vector4d(0.5,0.5,0,1)*/)
   {
