@@ -663,6 +663,11 @@ namespace scan_planner
   void SCANReplanFSM::changeFSMExecState(FSM_EXEC_STATE new_state, string pos_call)
   {
 
+    if (new_state != exec_state_ &&
+        (new_state == WAIT_TARGET || new_state == EMERGENCY_STOP))
+      visualization_->clearLocalPlan(new_state == WAIT_TARGET);
+
+
     if (new_state == exec_state_)
       continuously_called_times_++;
     else

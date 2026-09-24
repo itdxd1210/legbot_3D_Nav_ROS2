@@ -200,7 +200,7 @@ Visualization Manager:
           Style: Points
           Topic:
             Depth: 5
-            Durability Policy: Volatile
+            Durability Policy: Transient Local
             History Policy: Keep Last
             Reliability Policy: Reliable
             Value: /global_points
@@ -233,7 +233,7 @@ Visualization Manager:
           Style: Boxes
           Topic:
             Depth: 5
-            Durability Policy: Volatile
+            Durability Policy: Transient Local
             History Policy: Keep Last
             Reliability Policy: Reliable
             Value: /tomogram
@@ -262,11 +262,24 @@ Visualization Manager:
           Shaft Length: 0.10000000149011612
           Topic:
             Depth: 5
-            Durability Policy: Volatile
+            Durability Policy: Transient Local
             Filter size: 10
             History Policy: Keep Last
             Reliability Policy: Reliable
             Value: /pct_path
+          Value: true
+        - Class: rviz_default_plugins/Marker
+          Enabled: true
+          Name: PCT path sample points
+          Namespaces:
+            pct_global_path_samples: true
+          Topic:
+            Depth: 5
+            Durability Policy: Transient Local
+            Filter size: 10
+            History Policy: Keep Last
+            Reliability Policy: Reliable
+            Value: /pct_path_points
           Value: true
       Enabled: true
       Name: Global planning (PCT)
@@ -303,7 +316,7 @@ Visualization Manager:
             {}
           Topic:
             Depth: 5
-            Durability Policy: Volatile
+            Durability Policy: Transient Local
             Filter size: 10
             History Policy: Keep Last
             Reliability Policy: Reliable
@@ -316,7 +329,7 @@ Visualization Manager:
             {}
           Topic:
             Depth: 5
-            Durability Policy: Volatile
+            Durability Policy: Transient Local
             Filter size: 10
             History Policy: Keep Last
             Reliability Policy: Reliable
@@ -342,7 +355,7 @@ Visualization Manager:
             {}
           Topic:
             Depth: 5
-            Durability Policy: Volatile
+            Durability Policy: Transient Local
             Filter size: 10
             History Policy: Keep Last
             Reliability Policy: Reliable
@@ -355,7 +368,7 @@ Visualization Manager:
             {}
           Topic:
             Depth: 5
-            Durability Policy: Volatile
+            Durability Policy: Transient Local
             Filter size: 10
             History Policy: Keep Last
             Reliability Policy: Reliable

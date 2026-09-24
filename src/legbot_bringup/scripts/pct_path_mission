@@ -3,43 +3,71 @@
 
 import math
 import sys
+from collections import deque
 
 import rclpy
-from geometry_msgs.msg import PoseStamped, TransformStamped
+from geometry_msgs.msg import Point, PoseStamped, TransformStamped
 from nav_msgs.msg import Odometry, Path
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from std_msgs.msg import Bool
 from tf2_ros.static_transform_broadcaster import StaticTransformBroadcaster
+from visualization_msgs.msg import Marker
 
 
 def yaw_from_quaternion(q):
     return math.atan2(
-        2.0 * (q.w * q.z + q.x * q.y),
-        1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+        2.0 * (q[3] * q[2] + q[0] * q[1]),
+        1.0 - 2.0 * (q[1] * q[1] + q[2] * q[2]))
 
 
-def transform_xyz(local, odom, building, spawn):
-    """Building-local -> Gazebo world -> current FAST-LIO odom."""
-    lx, ly, lz = local
-    ox, oy, oz, odom_yaw = odom
-    bx, by, bz, building_yaw = building
-    sx, sy, sz, spawn_yaw = spawn
+def yaw_pose(x, y, z, yaw):
+    return (x, y, z, 0.0, 0.0, math.sin(yaw / 2.0), math.cos(yaw / 2.0))
 
-    cb, sb = math.cos(building_yaw), math.sin(building_yaw)
-    world_x = bx + cb * lx - sb * ly
-    world_y = by + sb * lx + cb * ly
-    world_z = bz + lz
 
-    yaw = odom_yaw - spawn_yaw
-    c, s = math.cos(yaw), math.sin(yaw)
-    dx, dy = world_x - sx, world_y - sy
-    return (
-        ox + c * dx - s * dy,
-        oy + s * dx + c * dy,
-        oz + world_z - sz,
-    )
+def odometry_pose(msg):
+    p = msg.pose.pose.position
+    q = msg.pose.pose.orientation
+    values = (p.x, p.y, p.z, q.x, q.y, q.z, q.w)
+    norm = math.sqrt(sum(value * value for value in values[3:]))
+    if not all(math.isfinite(value) for value in values) or not 0.5 <= norm <= 1.5:
+        return None
+    return values[:3] + tuple(value / norm for value in values[3:])
+
+
+def rotate_xyz(point, q):
+    x, y, z = point
+    qx, qy, qz, qw = q
+    tx, ty, tz = (2.0 * (qy * z - qz * y),
+                  2.0 * (qz * x - qx * z),
+                  2.0 * (qx * y - qy * x))
+    return (x + qw * tx + qy * tz - qz * ty,
+            y + qw * ty + qz * tx - qx * tz,
+            z + qw * tz + qx * ty - qy * tx)
+
+
+def compose_pose(left, right):
+    """Rigid transform composition: left_from_mid * mid_from_right."""
+    rx, ry, rz = rotate_xyz(right[:3], left[3:])
+    ax, ay, az, aw = left[3:]
+    bx, by, bz, bw = right[3:]
+    return (left[0] + rx, left[1] + ry, left[2] + rz,
+            aw * bx + ax * bw + ay * bz - az * by,
+            aw * by - ax * bz + ay * bw + az * bx,
+            aw * bz + ax * by - ay * bx + az * bw,
+            aw * bw - ax * bx - ay * by - az * bz)
+
+
+def inverse_pose(pose):
+    q_inv = (-pose[3], -pose[4], -pose[5], pose[6])
+    translation = rotate_xyz(tuple(-value for value in pose[:3]), q_inv)
+    return translation + q_inv
+
+
+def transform_xyz(local, odom_from_building):
+    rotated = rotate_xyz(local, odom_from_building[3:])
+    return tuple(odom_from_building[i] + rotated[i] for i in range(3))
 
 
 class PctPathMission(Node):
@@ -53,6 +81,14 @@ class PctPathMission(Node):
             'goal_topic', '/scan/goal').value)
         self.odom_topic = str(self.declare_parameter(
             'odom_topic', '/fast_lio/odometry_base').value)
+        # Optional base pose in the coordinate frame of the saved PCT map.
+        # A simulator may supply truth; hardware needs its own map localization.
+        self.map_pose_topic = str(self.declare_parameter(
+            'map_pose_topic', '').value)
+        self.max_alignment_dt = float(self.declare_parameter(
+            'max_alignment_dt', 0.05).value)
+        if self.max_alignment_dt <= 0.0:
+            raise ValueError('max_alignment_dt must be positive')
         self.ready_topic = str(self.declare_parameter(
             'ready_topic', '/go2/demo_ready').value)
         self.frame_id = str(self.declare_parameter('frame_id', 'odom').value)
@@ -81,6 +117,8 @@ class PctPathMission(Node):
         reliable.reliability = ReliabilityPolicy.RELIABLE
 
         self.path_pub = self.create_publisher(Path, self.output_topic, latched)
+        self.path_points_pub = self.create_publisher(
+            Marker, '/pct_path_points', latched)
         self.goal_pub = self.create_publisher(PoseStamped, self.goal_topic, reliable)
         self.complete_pub = self.create_publisher(
             Bool, '/scan/mission_complete', latched)
@@ -88,12 +126,18 @@ class PctPathMission(Node):
         self.create_subscription(Path, self.input_topic, self.on_path, latched)
         self.create_subscription(
             Odometry, self.odom_topic, self.on_odom, qos_profile_sensor_data)
+        if self.map_pose_topic:
+            self.create_subscription(
+                Odometry, self.map_pose_topic, self.on_map_pose, qos_profile_sensor_data)
         self.create_subscription(Bool, self.ready_topic, self.on_ready, latched)
         self.create_subscription(
             PoseStamped, '/scan/goal_stop_ack', self.on_stop_ack, reliable)
 
         self.raw_path = None
         self.initial_odom = None
+        self.initial_odom_stamp = None
+        self.map_pose_samples = deque(maxlen=30)
+        self.odom_from_building = None
         self.ready = False
         self.started = False
         self.completed = False
@@ -123,12 +167,23 @@ class PctPathMission(Node):
     def on_odom(self, msg):
         if self.started:
             return
-        p = msg.pose.pose.position
-        yaw = yaw_from_quaternion(msg.pose.pose.orientation)
-        values = (p.x, p.y, p.z, yaw)
-        if all(math.isfinite(value) for value in values):
-            self.initial_odom = values
-            self.start_if_ready()
+        pose = odometry_pose(msg)
+        if pose is None:
+            return
+        self.initial_odom = pose
+        self.initial_odom_stamp = (
+            msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9)
+        self.start_if_ready()
+
+    def on_map_pose(self, msg):
+        if self.started:
+            return
+        pose = odometry_pose(msg)
+        if pose is None:
+            return
+        stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        self.map_pose_samples.append((stamp, pose))
+        self.start_if_ready()
 
     def on_ready(self, msg):
         self.ready = bool(msg.data)
@@ -137,6 +192,30 @@ class PctPathMission(Node):
     def start_if_ready(self):
         if self.started or not self.ready or self.raw_path is None or self.initial_odom is None:
             return
+        if self.map_pose_topic:
+            if not self.map_pose_samples or not self.initial_odom_stamp:
+                return
+            map_stamp, map_from_base = min(
+                self.map_pose_samples,
+                key=lambda sample: abs(sample[0] - self.initial_odom_stamp))
+            dt = abs(map_stamp - self.initial_odom_stamp)
+            if dt > self.max_alignment_dt:
+                return
+            odom_from_base = self.initial_odom
+            self.get_logger().info(
+                '6D map alignment: %s matched %s at dt=%.3f s' %
+                (self.map_pose_topic, self.odom_topic, dt))
+        else:
+            # Legacy known-spawn calibration is yaw-only. It cannot infer
+            # startup roll/pitch and is retained for unchanged default runs.
+            map_from_base = yaw_pose(*self.spawn)
+            odom_from_base = yaw_pose(
+                *self.initial_odom[:3],
+                yaw_from_quaternion(self.initial_odom[3:]))
+        odom_from_map = compose_pose(
+            odom_from_base, inverse_pose(map_from_base))
+        self.odom_from_building = compose_pose(
+            odom_from_map, yaw_pose(*self.building))
 
         stamp = self.get_clock().now().to_msg()
         self.publish_map_transform(stamp)
@@ -150,8 +229,7 @@ class PctPathMission(Node):
                 source.pose.position.y,
                 source.pose.position.z,
             )
-            points.append(transform_xyz(
-                local, self.initial_odom, self.building, self.spawn))
+            points.append(transform_xyz(local, self.odom_from_building))
 
         for index, point in enumerate(points):
             pose = PoseStamped()
@@ -177,6 +255,7 @@ class PctPathMission(Node):
         self.complete_pub.publish(Bool(data=False))
         self.goal_pub.publish(final_goal)
         self.path_pub.publish(transformed)
+        self.publish_path_points(transformed)
         self.started = True
 
         connector = math.dist(self.initial_odom[:3], points[0])
@@ -185,13 +264,36 @@ class PctPathMission(Node):
             'entrance=[%.2f %.2f %.2f], final=[%.2f %.2f %.2f]' %
             (connector, len(points), *points[0], *points[-1]))
 
+    def publish_path_points(self, path):
+        """Publish the PCT samples as RViz-only dots; navigation still uses Path."""
+        marker = Marker()
+        marker.header = path.header
+        marker.ns = 'pct_global_path_samples'
+        marker.id = 0
+        marker.type = Marker.SPHERE_LIST
+        marker.action = Marker.ADD
+        marker.pose.orientation.w = 1.0
+        marker.scale.x = 0.12
+        marker.scale.y = 0.12
+        marker.scale.z = 0.12
+        marker.color.r = 1.0
+        marker.color.g = 1.0
+        marker.color.b = 1.0
+        marker.color.a = 1.0
+        marker.points = [
+            Point(x=pose.pose.position.x,
+                  y=pose.pose.position.y,
+                  z=pose.pose.position.z)
+            for pose in path.poses
+        ]
+        self.path_points_pub.publish(marker)
+
     def publish_map_transform(self, stamp):
         """Publish the same Building-local -> odom transform used by the route."""
         if self.map_tf_published or not self.publish_map_tf:
             return
-        origin = transform_xyz(
-            (0.0, 0.0, 0.0), self.initial_odom, self.building, self.spawn)
-        yaw = (self.initial_odom[3] - self.spawn[3]) + self.building[3]
+        origin = self.odom_from_building[:3]
+        rotation = self.odom_from_building[3:]
         transform = TransformStamped()
         transform.header.stamp = stamp
         transform.header.frame_id = self.frame_id
@@ -199,13 +301,14 @@ class PctPathMission(Node):
         transform.transform.translation.x = origin[0]
         transform.transform.translation.y = origin[1]
         transform.transform.translation.z = origin[2]
-        transform.transform.rotation.z = math.sin(0.5 * yaw)
-        transform.transform.rotation.w = math.cos(0.5 * yaw)
+        (transform.transform.rotation.x, transform.transform.rotation.y,
+         transform.transform.rotation.z, transform.transform.rotation.w) = rotation
         self.static_tf.sendTransform(transform)
         self.map_tf_published = True
         self.get_logger().info(
             'Published static map TF: %s -> %s, xyz=[%.2f %.2f %.2f], yaw=%.3f' %
-            (self.frame_id, self.pct_frame_id, *origin, yaw))
+            (self.frame_id, self.pct_frame_id, *origin,
+             yaw_from_quaternion(rotation)))
 
     def on_stop_ack(self, msg):
         if not self.started or self.completed or self.goal_stamp is None:
@@ -222,22 +325,35 @@ class PctPathMission(Node):
 def self_test():
     # Default geometry: local entrance (-5.5,6) + Building x=13 gives
     # Gazebo (7.5,6). Relative to spawn (-27,6), odom entrance is x=34.5.
+    odom_from_building = compose_pose(
+        yaw_pose(0.0, 0.0, 0.50, 0.0),
+        compose_pose(
+            inverse_pose(yaw_pose(-27.0, 6.0, 0.50, 0.0)),
+            yaw_pose(13.0, 0.0, 0.0, 0.0)))
     result = transform_xyz(
-        (-5.5, 6.0, 0.558),
-        (0.0, 0.0, 0.50, 0.0),
-        (13.0, 0.0, 0.0, 0.0),
-        (-27.0, 6.0, 0.50, 0.0))
+        (-5.5, 6.0, 0.558), odom_from_building)
     assert math.isclose(result[0], 34.5, abs_tol=1e-9)
     assert math.isclose(result[1], 0.0, abs_tol=1e-9)
     assert math.isclose(result[2], 0.558, abs_tol=1e-9)
-    rotated = transform_xyz(
-        (-5.5, 6.0, 0.5),
-        (1.0, 2.0, 0.5, math.pi / 2),
-        (13.0, 0.0, 0.0, 0.0),
-        (-27.0, 6.0, 0.5, 0.0))
+    rotated_tf = compose_pose(
+        yaw_pose(1.0, 2.0, 0.5, math.pi / 2),
+        compose_pose(
+            inverse_pose(yaw_pose(-27.0, 6.0, 0.5, 0.0)),
+            yaw_pose(13.0, 0.0, 0.0, 0.0)))
+    rotated = transform_xyz((-5.5, 6.0, 0.5), rotated_tf)
     assert math.isclose(rotated[0], 1.0, abs_tol=1e-9)
     assert math.isclose(rotated[1], 36.5, abs_tol=1e-9)
-    print('PASS PCT Building-local -> selected navigation odom mission transform')
+    pitch = math.radians(3.0)
+    map_from_base = (0.0, 0.0, 0.0, 0.0, math.sin(pitch / 2.0),
+                     0.0, math.cos(pitch / 2.0))
+    odom_from_map = compose_pose(
+        yaw_pose(0.0, 0.0, 0.0, 0.0), inverse_pose(map_from_base))
+    tilted = transform_xyz((10.0, 0.0, 0.0), odom_from_map)
+    assert math.isclose(tilted[2], 10.0 * math.sin(pitch), abs_tol=1e-9)
+    identity = compose_pose(map_from_base, inverse_pose(map_from_base))
+    assert all(math.isclose(value, expected, abs_tol=1e-9)
+               for value, expected in zip(identity, (0, 0, 0, 0, 0, 0, 1)))
+    print('PASS PCT Building-local -> navigation odom rigid transform')
 
 
 def main():

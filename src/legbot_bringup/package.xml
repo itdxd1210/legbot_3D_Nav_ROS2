@@ -22,6 +22,7 @@
 <depend>ros_gz_bridge</depend>
 <depend>robot_state_publisher</depend>
 <depend>controller_manager</depend>
+<depend>controller_manager_msgs</depend>
 <depend>go2_description</depend>
 <depend>rclpy</depend>
 <depend>control_input_msgs</depend>

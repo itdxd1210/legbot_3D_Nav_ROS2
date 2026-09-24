@@ -30,6 +30,12 @@ def setup(context):
     spawn_z = LaunchConfiguration('spawn_z')
     spawn_yaw = LaunchConfiguration('spawn_yaw')
     use_sim_time = LaunchConfiguration('use_sim_time')
+    diagnose_fastlio = (
+        not use_ground_truth and
+        LaunchConfiguration('diagnose_fastlio').perform(context) == 'true')
+    align_with_ground_truth = (
+        not use_ground_truth and
+        LaunchConfiguration('align_with_ground_truth').perform(context) == 'true')
 
     if use_ground_truth:
         odom_topic = '/Odometry_gazebo'
@@ -54,7 +60,11 @@ def setup(context):
             'z': spawn_z,
             'yaw': spawn_yaw,
             'navigation_source': navigation_source,
-            'publish_ground_truth': 'true' if use_ground_truth else 'false',
+            # In the explicit 6D-alignment experiment, Gazebo supplies only
+            # the initial map pose; SCAN and control still use FAST-LIO odom.
+            'publish_ground_truth': 'true' if (
+                use_ground_truth or diagnose_fastlio or align_with_ground_truth) else 'false',
+            'diagnose_fastlio': 'true' if diagnose_fastlio else 'false',
         }),
     ]
     if not use_ground_truth:
@@ -62,6 +72,8 @@ def setup(context):
             'use_sim_time': use_sim_time,
             'config': os.path.join(
                 share('legbot_bringup'), 'config', 'fastlio_sim.yaml'),
+            'wait_for_start': 'true',
+            'start_topic': '/fast_lio/start',
         }))
 
     # The normal six-terminal workflow starts this coordinator only after all
@@ -74,12 +86,15 @@ def setup(context):
                 'odom_topic': odom_topic,
                 'cloud_topic': cloud_topic,
                 'localization_label': localization_label,
+                'gate_fastlio_start': 'true' if not use_ground_truth else 'false',
+                'fastlio_start_topic': '/fast_lio/start',
             })]),
         include('legbot_bringup', 'pct_plan.launch.py', {
             'use_sim_time': use_sim_time,
             'tomogram': 'building2_9',
             'path_topic': '/pct_path_raw',
             'frame_id': 'building_pct',
+            'display_frame': 'odom',
         }),
         include('legbot_bringup', 'scan.launch.py', {
             'use_sim_time': use_sim_time,
@@ -110,6 +125,7 @@ def setup(context):
                 'output_topic': '/pct_path',
                 'goal_topic': '/scan/goal',
                 'odom_topic': odom_topic,
+                'map_pose_topic': '/Odometry_gazebo' if align_with_ground_truth else '',
                 'ready_topic': '/go2/demo_ready',
                 'frame_id': 'odom',
                 'pct_frame_id': 'building_pct',
@@ -157,6 +173,19 @@ def generate_launch_description():
             description=(
                 'Ground truth is the reliable default for the long simulated cross-floor run; '
                 'fastlio remains available for localization integration tests.')),
+        DeclareLaunchArgument(
+            'diagnose_fastlio', default_value='true', choices=['true', 'false'],
+            description=(
+                'When navigation_source:=fastlio, publish Gazebo truth for '
+                'fastlio_truth_monitor. It is also an initial map-alignment '
+                'reference only if align_with_ground_truth:=true.')),
+        DeclareLaunchArgument(
+            'align_with_ground_truth', default_value='false',
+            choices=['true', 'false'],
+            description=(
+                'Simulation-only 6D initial map/odom alignment experiment. '
+                'When true with FAST-LIO, pct_path_mission samples Gazebo world '
+                'pose once; normal navigation still uses FAST-LIO.')),
         DeclareLaunchArgument('spawn_x', default_value='-27.0'),
         DeclareLaunchArgument('spawn_y', default_value='6.0'),
         DeclareLaunchArgument('spawn_z', default_value='0.50'),

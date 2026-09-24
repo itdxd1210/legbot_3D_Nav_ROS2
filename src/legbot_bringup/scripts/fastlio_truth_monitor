@@ -9,10 +9,16 @@ from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 
 
-def yaw_from_quaternion(q):
-    return math.atan2(
+def rpy_from_quaternion(q):
+    roll = math.atan2(
+        2.0 * (q.w * q.x + q.y * q.z),
+        1.0 - 2.0 * (q.x * q.x + q.y * q.y))
+    sin_pitch = 2.0 * (q.w * q.y - q.z * q.x)
+    pitch = math.asin(max(-1.0, min(1.0, sin_pitch)))
+    yaw = math.atan2(
         2.0 * (q.w * q.z + q.x * q.y),
         1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+    return roll, pitch, yaw
 
 
 def wrap_angle(value):
@@ -37,8 +43,17 @@ class FastLioTruthMonitor(Node):
         self.samples = 0
         self.sum_xy_sq = 0.0
         self.sum_z_sq = 0.0
+        self.sum_yaw_sq = 0.0
+        self.sum_roll_sq = 0.0
+        self.sum_pitch_sq = 0.0
         self.max_xy = 0.0
         self.max_abs_z = 0.0
+        self.max_abs_yaw = 0.0
+        self.max_abs_roll = 0.0
+        self.max_abs_pitch = 0.0
+        self.start_stamp = None
+        self.last_truth_xy = None
+        self.truth_distance = 0.0
         self.latest = None
         self.create_subscription(
             Odometry, self.lio_topic, self.on_lio, qos_profile_sensor_data)
@@ -56,7 +71,7 @@ class FastLioTruthMonitor(Node):
     @staticmethod
     def pose(msg):
         p = msg.pose.pose.position
-        return p.x, p.y, p.z, yaw_from_quaternion(msg.pose.pose.orientation)
+        return p.x, p.y, p.z, *rpy_from_quaternion(msg.pose.pose.orientation)
 
     def on_lio(self, msg):
         self.lio = msg
@@ -79,10 +94,12 @@ class FastLioTruthMonitor(Node):
         truth = self.pose(self.truth)
         if self.origin is None:
             self.origin = (lio, truth)
+            self.start_stamp = lio_stamp
+            self.last_truth_xy = truth[:2]
             self.get_logger().info('FAST-LIO/truth initial poses aligned; drift accumulation started.')
             return
         lio0, truth0 = self.origin
-        heading_offset = wrap_angle(truth0[3] - lio0[3])
+        heading_offset = wrap_angle(truth0[5] - lio0[5])
         c = math.cos(heading_offset)
         s = math.sin(heading_offset)
         dx = lio[0] - lio0[0]
@@ -92,13 +109,29 @@ class FastLioTruthMonitor(Node):
         aligned_z = truth0[2] + lio[2] - lio0[2]
         xy_error = math.hypot(aligned_x - truth[0], aligned_y - truth[1])
         z_error = aligned_z - truth[2]
-        yaw_error = wrap_angle(lio[3] + heading_offset - truth[3])
+        roll_error = wrap_angle(
+            (lio[3] - lio0[3]) - (truth[3] - truth0[3]))
+        pitch_error = wrap_angle(
+            (lio[4] - lio0[4]) - (truth[4] - truth0[4]))
+        yaw_error = wrap_angle(lio[5] + heading_offset - truth[5])
+        self.truth_distance += math.hypot(
+            truth[0] - self.last_truth_xy[0], truth[1] - self.last_truth_xy[1])
+        self.last_truth_xy = truth[:2]
         self.samples += 1
         self.sum_xy_sq += xy_error * xy_error
         self.sum_z_sq += z_error * z_error
+        self.sum_yaw_sq += yaw_error * yaw_error
+        self.sum_roll_sq += roll_error * roll_error
+        self.sum_pitch_sq += pitch_error * pitch_error
         self.max_xy = max(self.max_xy, xy_error)
         self.max_abs_z = max(self.max_abs_z, abs(z_error))
-        self.latest = (xy_error, z_error, yaw_error)
+        self.max_abs_yaw = max(self.max_abs_yaw, abs(yaw_error))
+        self.max_abs_roll = max(self.max_abs_roll, abs(roll_error))
+        self.max_abs_pitch = max(self.max_abs_pitch, abs(pitch_error))
+        self.latest = (
+            lio_stamp - self.start_stamp, self.truth_distance,
+            truth[0], truth[1], xy_error, z_error,
+            roll_error, pitch_error, yaw_error)
 
     def report(self):
         if self.latest is None or self.samples == 0:
@@ -106,14 +139,23 @@ class FastLioTruthMonitor(Node):
                 'Waiting for time-aligned FAST-LIO and Gazebo odometry samples...',
                 throttle_duration_sec=5.0)
             return
-        xy, z, yaw = self.latest
+        elapsed, distance, truth_x, truth_y, xy, z, roll, pitch, yaw = self.latest
         self.get_logger().info(
-            '[FAST-LIO error] current: xy=%.3f m z=%+.3f m yaw=%+.2f deg; '
-            'RMSE: xy=%.3f m z=%.3f m; max: xy=%.3f m |z|=%.3f m; n=%d'
-            % (xy, z, math.degrees(yaw),
+            '[FAST-LIO error t=%.1fs s=%.1fm truth=(%.2f,%.2f)] '
+            'current: xy=%.3f m z=%+.3f m rpy=(%+.2f,%+.2f,%+.2f) deg; '
+            'RMSE: xy=%.3f m z=%.3f m rpy=(%.2f,%.2f,%.2f) deg; '
+            'max: xy=%.3f m |z|=%.3f m |rpy|=(%.2f,%.2f,%.2f) deg; n=%d'
+            % (elapsed, distance, truth_x, truth_y,
+               xy, z, math.degrees(roll), math.degrees(pitch), math.degrees(yaw),
                math.sqrt(self.sum_xy_sq / self.samples),
                math.sqrt(self.sum_z_sq / self.samples),
-               self.max_xy, self.max_abs_z, self.samples))
+               math.degrees(math.sqrt(self.sum_roll_sq / self.samples)),
+               math.degrees(math.sqrt(self.sum_pitch_sq / self.samples)),
+               math.degrees(math.sqrt(self.sum_yaw_sq / self.samples)),
+               self.max_xy, self.max_abs_z,
+               math.degrees(self.max_abs_roll),
+               math.degrees(self.max_abs_pitch),
+               math.degrees(self.max_abs_yaw), self.samples))
 
 
 def main():

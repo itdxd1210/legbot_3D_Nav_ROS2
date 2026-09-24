@@ -325,8 +325,12 @@ Visualization Manager:
           Size (Pixels): 2
           Size (m): 0.029999999329447746
           Style: Points
-          Topic: /global_points
-          Unreliable: false
+          Topic:
+            Depth: 5
+            Durability Policy: Transient Local
+            History Policy: Keep Last
+            Reliability Policy: Reliable
+            Value: /global_points
           Use Fixed Frame: true
           Use rainbow: true
           Value: true
@@ -353,8 +357,12 @@ Visualization Manager:
           Size (Pixels): 3
           Size (m): 0.07999999821186066
           Style: Boxes
-          Topic: /tomogram
-          Unreliable: false
+          Topic:
+            Depth: 5
+            Durability Policy: Transient Local
+            History Policy: Keep Last
+            Reliability Policy: Reliable
+            Value: /tomogram
           Use Fixed Frame: true
           Use rainbow: true
           Value: true
@@ -375,12 +383,29 @@ Visualization Manager:
             Z: 0
           Pose Color: 255; 85; 255
           Pose Style: None
-          Queue Size: 5
           Radius: 0.029999999329447746
           Shaft Diameter: 0.10000000149011612
           Shaft Length: 0.10000000149011612
-          Topic: /pct_path
-          Unreliable: false
+          Topic:
+            Depth: 5
+            Durability Policy: Transient Local
+            Filter size: 10
+            History Policy: Keep Last
+            Reliability Policy: Reliable
+            Value: /pct_path
+          Value: true
+        - Class: rviz_default_plugins/Marker
+          Enabled: true
+          Name: PCT path sample points
+          Namespaces:
+            pct_global_path_samples: true
+          Topic:
+            Depth: 5
+            Durability Policy: Transient Local
+            Filter size: 10
+            History Policy: Keep Last
+            Reliability Policy: Reliable
+            Value: /pct_path_points
           Value: true
       Enabled: true
       Name: Global planning (PCT)
@@ -404,7 +429,13 @@ Visualization Manager:
           Value: true
         - Class: rviz_default_plugins/Marker
           Enabled: true
-          Topic: /local_planner/optimal_path
+          Topic:
+            Depth: 5
+            Durability Policy: Transient Local
+            Filter size: 10
+            History Policy: Keep Last
+            Reliability Policy: Reliable
+            Value: /local_planner/optimal_path
           Name: Active local trajectory
           Namespaces:
             {}
@@ -412,7 +443,13 @@ Visualization Manager:
           Value: true
         - Class: rviz_default_plugins/Marker
           Enabled: true
-          Topic: /local_planner/goal
+          Topic:
+            Depth: 5
+            Durability Policy: Transient Local
+            Filter size: 10
+            History Policy: Keep Last
+            Reliability Policy: Reliable
+            Value: /local_planner/goal
           Name: Current reference waypoint
           Namespaces:
             {}
@@ -420,7 +457,13 @@ Visualization Manager:
           Value: true
         - Class: rviz_default_plugins/Marker
           Enabled: true
-          Topic: /scan/local_target
+          Topic:
+            Depth: 5
+            Durability Policy: Transient Local
+            Filter size: 10
+            History Policy: Keep Last
+            Reliability Policy: Reliable
+            Value: /scan/local_target
           Name: SCAN dynamic local target
           Namespaces:
             {}
@@ -428,7 +471,13 @@ Visualization Manager:
           Value: true
         - Class: rviz_default_plugins/Marker
           Enabled: true
-          Topic: /scan/heading_vector
+          Topic:
+            Depth: 5
+            Durability Policy: Transient Local
+            Filter size: 10
+            History Policy: Keep Last
+            Reliability Policy: Reliable
+            Value: /scan/heading_vector
           Name: SCAN expected heading
           Namespaces:
             {}
