@@ -22,6 +22,8 @@ for path in sorted(Path('src/legbot_bringup/launch').glob('*.launch.py')):
         context.launch_configurations['network_interface'] = next(
             (item.name for item in Path('/sys/class/net').iterdir() if item.name != 'lo'),
             'test_eth0')
+    if path.name == 'view_mapping.launch.py':
+        context.launch_configurations['map_directory'] = str(Path('data').resolve())
     actions = list(description.entities)
     # setup only constructs actions: never call execute() on a Node or include.
     if path.name == 'simulation.launch.py':

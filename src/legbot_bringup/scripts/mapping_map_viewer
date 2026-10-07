@@ -1,0 +1,148 @@
+#!/usr/bin/python3
+"""Bounded visualization only: live registered scans or recorder PCD chunks."""
+import json
+from pathlib import Path
+import numpy as np
+import rclpy
+from rclpy.node import Node
+from rclpy.qos import QoSProfile, DurabilityPolicy, qos_profile_sensor_data
+from sensor_msgs.msg import PointCloud2
+from sensor_msgs_py import point_cloud2
+from std_msgs.msg import Header
+
+
+class VoxelPreview:
+    def __init__(self, voxel, limit):
+        if voxel <= 0 or limit < 1:
+            raise ValueError('voxel_size and max_points must be positive')
+        self.voxel, self.limit = voxel, limit
+        self.points = np.empty((0, 3), dtype=np.float32)
+
+    def add(self, points):
+        points = np.asarray(points, dtype=np.float32)
+        points = points[np.isfinite(points).all(axis=1)]
+        # Bounded input batches; no full-resolution concatenated map.
+        for start in range(0, len(points), 200000):
+            combined = np.concatenate((self.points, points[start:start+200000]))
+            while True:
+                keys = np.floor(combined.astype(np.float64) / self.voxel).astype(np.int64)
+                _, indices = np.unique(keys, axis=0, return_index=True)
+                reduced = combined[indices]
+                if len(reduced) <= self.limit:
+                    self.points = reduced
+                    break
+                self.voxel *= 2
+
+
+def read_chunk(path):
+    # Recorder's exact binary XYZ schema, not an arbitrary PCD converter.
+    with path.open('rb') as stream:
+        header = {}
+        for _ in range(50):
+            line = stream.readline().decode('ascii').strip()
+            if not line or line.startswith('#'):
+                continue
+            key, *values = line.split()
+            header[key] = values
+            if key == 'DATA':
+                offset = stream.tell()
+                break
+        else:
+            raise ValueError('PCD header missing DATA: %s' % path)
+    for key, expected in {'FIELDS':['x','y','z'], 'SIZE':['4','4','4'],
+                          'TYPE':['F','F','F'], 'COUNT':['1','1','1'],
+                          'DATA':['binary']}.items():
+        if header.get(key) != expected:
+            raise ValueError('Unsupported PCD schema: %s' % path)
+    count = int(header['POINTS'][0])
+    if count < 0 or path.stat().st_size != offset + count * 12:
+        raise ValueError('PCD size mismatch: %s' % path)
+    if count:
+        data = np.memmap(path, mode='r', dtype='<f4', offset=offset, shape=(count,3))
+        for start in range(0, count, 200000):
+            yield np.asarray(data[start:start+200000])
+
+
+class Viewer(Node):
+    def __init__(self):
+        super().__init__('mapping_map_viewer')
+        self.preview = VoxelPreview(float(self.declare_parameter('voxel_size', .10).value),
+                                    int(self.declare_parameter('max_points', 500000).value))
+        self.declare_parameter('z_min', -10000.)
+        self.declare_parameter('z_max', 10000.)
+        self.frame = ''
+        self.last_sample = None
+        self.dirty = True
+        self.last_limits = None
+        qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.pub = self.create_publisher(PointCloud2, '/mapping/map_preview', qos)
+        folder = str(self.declare_parameter('map_directory', '').value)
+        self.create_timer(2., self.publish)
+        if folder:
+            directory = Path(folder).expanduser().resolve()
+            manifest = json.loads((directory/'manifest.json').read_text())
+            self.frame = manifest['frame_id']
+            if not self.frame:
+                raise ValueError('Missing frame in manifest')
+            for chunk in manifest['chunks']:
+                path = (directory/chunk['file']).resolve()
+                if path.parent != directory:
+                    raise ValueError('Chunk outside map directory')
+                for points in read_chunk(path):
+                    self.preview.add(points)
+            self.get_logger().info('Loaded %d chunks; preview %d points, voxel %.3fm' %
+                (len(manifest['chunks']), len(self.preview.points), self.preview.voxel))
+        else:
+            self.create_subscription(PointCloud2, '/fast_lio/cloud_registered',
+                                     self.receive, qos_profile_sensor_data)
+
+    def receive(self, msg):
+        stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        if not msg.header.frame_id:
+            return
+        if self.frame and self.frame != msg.header.frame_id:
+            self.get_logger().error('Frame changed; refusing mixed-frame preview')
+            return
+        if self.last_sample is not None:
+            if stamp < self.last_sample:
+                self.get_logger().error('Clock reset; restart preview for a new session')
+                return
+            if stamp-self.last_sample < .5:
+                return
+        self.frame = msg.header.frame_id
+        self.last_sample = stamp
+        points = point_cloud2.read_points_numpy(msg, field_names=('x','y','z'),
+                                               skip_nans=False).reshape(-1,3)
+        old = self.preview.voxel
+        self.preview.add(points)
+        if old != self.preview.voxel:
+            self.get_logger().warning('Preview point cap: voxel increased to %.3fm (saved PCD unchanged)' % self.preview.voxel)
+        self.dirty = True
+
+    def publish(self):
+        limits = (float(self.get_parameter('z_min').value), float(self.get_parameter('z_max').value))
+        if not self.frame or (not self.dirty and limits == self.last_limits):
+            return
+        points = self.preview.points
+        selected = points[(points[:,2] >= limits[0]) & (points[:,2] <= limits[1])]
+        header = Header(); header.frame_id = self.frame
+        self.pub.publish(point_cloud2.create_cloud_xyz32(header, selected))
+        self.last_limits = limits
+        self.dirty = False
+
+
+def main():
+    rclpy.init()
+    node = Viewer()
+    try:
+        rclpy.spin(node)
+    except (KeyboardInterrupt, rclpy.executors.ExternalShutdownException):
+        pass
+    finally:
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()

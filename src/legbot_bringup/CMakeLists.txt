@@ -10,6 +10,9 @@ ament_target_dependencies(${n} legbot_runtime tf2_sensor_msgs)
 install(TARGETS ${n} DESTINATION lib/${PROJECT_NAME})
 endforeach()
 install(PROGRAMS
+  scripts/mapping_map_viewer
+  scripts/mapping_pcd_recorder
+  scripts/go2_mapping_keyboard
   scripts/go2_command_adapter
   scripts/go2_estop_keyboard
   scripts/go2_demo_sequencer

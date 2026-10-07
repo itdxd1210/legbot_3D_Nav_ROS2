@@ -1,0 +1,75 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+Visualization Manager:
+  Class: ""
+  Global Options:
+    Background Color: 30; 30; 30
+    Fixed Frame: odom
+    Frame Rate: 15
+  Displays:
+    - Class: rviz_default_plugins/Axes
+      Name: Odom XYZ axes
+      Enabled: true
+      Reference Frame: odom
+      Length: 2
+      Radius: 0.03
+    - Class: rviz_default_plugins/PointCloud2
+      Name: Accumulated map (height color)
+      Enabled: true
+      Topic:
+        Value: /mapping/map_preview
+        Reliability Policy: Reliable
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Depth: 1
+      Position Transformer: XYZ
+      Color Transformer: AxisColor
+      Axis: Z
+      Autocompute Value Bounds:
+        Min Value: -0.7
+        Max Value: 5.5
+        Value: false
+      Use Fixed Frame: true
+      Style: Points
+      Size (Pixels): 2
+      Decay Time: 0
+    - Class: rviz_default_plugins/Grid
+      Name: Grid
+      Enabled: true
+      Cell Size: 1
+      Plane Cell Count: 50
+    - Class: rviz_default_plugins/PointCloud2
+      Name: Live LIO scans (not entire saved map)
+      Enabled: false
+      Topic:
+        Value: /fast_lio/cloud_registered
+        Reliability Policy: Best Effort
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Depth: 2
+      Size (Pixels): 2
+      Style: Points
+      Color Transformer: AxisColor
+      Axis: Z
+      Decay Time: 2
+    - Class: rviz_default_plugins/Path
+      Name: LIO trajectory
+      Enabled: true
+      Topic:
+        Value: /fast_lio/path
+        Reliability Policy: Reliable
+        Durability Policy: Volatile
+        Depth: 1
+  Tools:
+    - Class: rviz_default_plugins/Interact
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/FocusCamera
+    - Class: rviz_default_plugins/Measure
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 20
+      Pitch: 0.6
+      Yaw: 0.7

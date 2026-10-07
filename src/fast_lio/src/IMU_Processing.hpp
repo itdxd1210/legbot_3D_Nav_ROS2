@@ -20,6 +20,7 @@
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <geometry_msgs/msg/vector3.hpp>
 #include "use-ikfom.hpp"
+#include "gravity_alignment.hpp"
 
 /// *************Preconfiguration
 
@@ -45,6 +46,7 @@ class ImuProcess
   void set_extrinsic(const V3D &transl, const M3D &rot);
   void set_extrinsic(const V3D &transl);
   void set_extrinsic(const MD(4,4) &T);
+  void set_gravity_alignment(bool enabled) { gravity_alignment_ = enabled; }
   void set_gyr_cov(const V3D &scaler);
   void set_acc_cov(const V3D &scaler);
   void set_gyr_bias_cov(const V3D &b_g);
@@ -62,6 +64,7 @@ class ImuProcess
   double first_lidar_time;
 
  private:
+  bool gravity_alignment_ = false;
   void IMU_init(const MeasureGroup &meas, esekfom::esekf<state_ikfom, 12, input_ikfom> &kf_state, int &N);
   void UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikfom, 12, input_ikfom> &kf_state, PointCloudXYZI &pcl_in_out);
 
@@ -235,9 +238,18 @@ void ImuProcess::IMU_init(const MeasureGroup &meas, esekfom::esekf<state_ikfom, 
     N ++;
   }
   state_ikfom init_state = kf_state.get_x();
-  init_state.grav = S2(- mean_acc / mean_acc.norm() * G_m_s2);
-  
-  //state_inout.rot = Eye3d; // Exp(mean_acc.cross(V3D(0, 0, -1 / scale_gravity)));
+  if (gravity_alignment_)
+  {
+    // A coordinate choice at initialization, not an ongoing attitude reset.
+    // R * normalized(mean_acc) * g + gravity = 0 for a stationary IMU.
+    init_state.rot = SO3(fastlio_init::gravityAlignedRotation(mean_acc).toRotationMatrix());
+    init_state.grav = S2(V3D(0.0, 0.0, -G_m_s2));
+  }
+  else
+  {
+    // Legacy initial-IMU frame convention, kept for controlled comparisons.
+    init_state.grav = S2(- mean_acc / mean_acc.norm() * G_m_s2);
+  }
   init_state.bg  = mean_gyr;
   init_state.offset_T_L_I = Lidar_T_wrt_IMU;
   init_state.offset_R_L_I = Lidar_R_wrt_IMU;
@@ -406,7 +418,9 @@ void ImuProcess::Process(const MeasureGroup &meas,  esekfom::esekf<state_ikfom, 
 
       cov_acc = cov_acc_scale;
       cov_gyr = cov_gyr_scale;
-      std::cout << "IMU Initial Done" << std::endl;
+      std::cout << "IMU Initial Done; gravity_alignment=" << (gravity_alignment_ ? "true" : "false")
+                << "; gravity_odom=[" << imu_state.grav[0] << ", "
+                << imu_state.grav[1] << ", " << imu_state.grav[2] << "]" << std::endl;
       // ROS_INFO("IMU Initial Done: Gravity: %.4f %.4f %.4f %.4f; state.bias_g: %.4f %.4f %.4f; acc covarience: %.8f %.8f %.8f; gry covarience: %.8f %.8f %.8f",\
       //          imu_state.grav[0], imu_state.grav[1], imu_state.grav[2], mean_acc.norm(), cov_bias_gyr[0], cov_bias_gyr[1], cov_bias_gyr[2], cov_acc[0], cov_acc[1], cov_acc[2], cov_gyr[0], cov_gyr[1], cov_gyr[2]);
       fout_imu.open(DEBUG_FILE_DIR("imu.txt"),ios::out);

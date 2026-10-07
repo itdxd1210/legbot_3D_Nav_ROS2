@@ -40,6 +40,7 @@ def setup(context):
     description = xacro.process_file(os.path.join(share('go2_description'), 'xacro/robot.xacro'),
                                      mappings={'GAZEBO': 'true', 'CLASSIC': 'false',
                                                'ENABLE_LIDAR': cfg('enable_lidar'),
+                                               'lidar_pitch': cfg('lidar_pitch'),
                                                'controller_config': os.path.join(share('go2_description'), 'config', controller_file)}).toxml()
     world = cfg('world')
     gz_args = ['-r', '-v', '3']
@@ -143,6 +144,8 @@ def generate_launch_description():
         DeclareLaunchArgument('diagnose_fastlio', default_value='false', choices=['true','false']),
         DeclareLaunchArgument('gui', default_value='false', choices=['true', 'false']),
         DeclareLaunchArgument('headless_rendering', default_value='true', choices=['true', 'false']),
+        # Positive pitch tilts the forward beam downward; IMU rotates with the LiDAR.
+        DeclareLaunchArgument('lidar_pitch', default_value='0.0'),
         DeclareLaunchArgument('enable_lidar', default_value='true', choices=['true', 'false']),
         DeclareLaunchArgument('require_navigation_data', default_value='true', choices=['true', 'false']),
         DeclareLaunchArgument('synthetic_stair_cloud', default_value='false', choices=['true', 'false']),

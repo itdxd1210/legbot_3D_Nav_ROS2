@@ -15,6 +15,8 @@ def setup(context):
         Node(package='fast_lio', executable='fastlio_mapping',
              parameters=[config, {
                  'use_sim_time': use_sim_time,
+                 'common.gravity_alignment': ParameterValue(
+                     LaunchConfiguration('gravity_alignment'), value_type=bool),
                  'common.wait_for_start': ParameterValue(
                      LaunchConfiguration('wait_for_start'), value_type=bool),
                  'common.start_topic': ParameterValue(
@@ -38,6 +40,7 @@ def setup(context):
 def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument('use_sim_time', default_value='false'),
+        DeclareLaunchArgument('gravity_alignment', default_value='false', choices=['true', 'false']),
         DeclareLaunchArgument('config', default_value=os.path.join(share('legbot_bringup'),'config/fastlio_real.yaml')),
         DeclareLaunchArgument('sensor_frame', default_value='livox_imu_link'),
         DeclareLaunchArgument('lidar_frame', default_value='livox_link'),

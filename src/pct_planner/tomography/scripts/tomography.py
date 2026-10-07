@@ -64,7 +64,7 @@ class Tomography(object):
         self.tomogram_pub = node.create_publisher(PointCloud2, tomogram_topic, QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
 
     def loadPCD(self, pcd_file):
-        pcd = o3d.io.read_point_cloud(rsg_root + "/src/pcd/" + pcd_file)
+        pcd = o3d.io.read_point_cloud(pcd_file if os.path.isabs(pcd_file) else os.path.join(rsg_root, "src/pcd", pcd_file))
         points = np.asarray(pcd.points).astype(np.float32)
         loginfo("PCD points: %d", points.shape[0])
 
@@ -122,7 +122,7 @@ class Tomography(object):
 
         self.n_slice = layers_g.shape[0]
 
-        map_file = os.path.splitext(self.pcd_file)[0] + '_go2'
+        map_file = os.path.splitext(os.path.basename(self.pcd_file))[0] + '_go2'
         self.exportTomogram(np.stack((layers_t, trav_grad_x, trav_grad_y, layers_g, layers_c)), map_file)
 
         self.initROS()
@@ -214,6 +214,8 @@ if __name__ == '__main__':
                         help='Traversability profile: Spiral, Building or Plaza')
     parser.add_argument('--pcd', type=str, default='',
                         help='PCD basename under PCT_planner/src/pcd; defaults to the scene profile')
+    parser.add_argument('--ground-h', type=float, default=None)
+    parser.add_argument('--once', action='store_true', help='Export without spinning visualization publishers')
     args = parser.parse_args(remove_ros_args(sys.argv)[1:])
 
     cfg = Config()
@@ -223,8 +225,8 @@ if __name__ == '__main__':
         parser.error('unknown scene profile: ' + args.scene)
 
     if args.pcd:
-        if os.path.basename(args.pcd) != args.pcd:
-            parser.error('--pcd must be a basename located under PCT_planner/src/pcd')
+        if not os.path.isabs(args.pcd) and os.path.basename(args.pcd) != args.pcd:
+            parser.error('--pcd must be an absolute path or bundled basename')
         pcd_path = os.path.normpath(os.path.join(rsg_root, 'src', 'pcd', args.pcd))
         if not os.path.isfile(pcd_path):
             parser.error('PCD does not exist: ' + pcd_path)
@@ -234,6 +236,13 @@ if __name__ == '__main__':
 
     loginfo('PCT scene profile: %s; PCD: %s', args.scene, scene_cfg.pcd.file_name)
 
+    if args.ground_h is not None:
+        if not np.isfinite(args.ground_h):
+            parser.error('--ground-h must be finite')
+        scene_cfg.map.ground_h = args.ground_h
     mapping = Tomography(cfg, scene_cfg)
 
-    rclpy.spin(node)
+    if not args.once:
+        rclpy.spin(node)
+    node.destroy_node()
+    rclpy.shutdown()

@@ -1,0 +1,99 @@
+#!/usr/bin/python3
+"""Simulation-only manual mapping controls, with wall-time deadman."""
+import os
+import select
+import sys
+import termios
+import time
+import tty
+import rclpy
+from rclpy.node import Node
+from rclpy.qos import QoSProfile, DurabilityPolicy
+from geometry_msgs.msg import Twist
+from std_msgs.msg import Bool, Int32
+from rosgraph_msgs.msg import Clock
+
+
+class Keyboard(Node):
+    def __init__(self):
+        super().__init__('go2_mapping_keyboard')
+        self.pub = self.create_publisher(Twist, '/cmd_vel', 10)
+        self.mode = self.create_publisher(Int32, '/go2/control_mode', 10)
+        self.start = self.create_publisher(Bool, '/fast_lio/start',
+            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
+        self.last_clock = -1e9
+        self.create_subscription(Clock, '/clock', self.clock_received, 10)
+        self.forward_speed = .25
+        self.velocity = (0., 0., 0.)
+        self.until = 0.
+        self.pending_mode = 0
+        self.mode_until = 0.
+
+    def clock_received(self, msg):
+        self.last_clock = time.monotonic()
+
+    def key(self, key):
+        now = time.monotonic()
+        if now - self.last_clock > 2.:
+            self.get_logger().warning('No fresh simulation /clock; controls disabled')
+            return
+        speeds = {'g': .25, 'f': .4, 'h': .6}
+        if key in speeds:
+            self.forward_speed = speeds[key]
+            self.get_logger().info('Forward speed: %.2f m/s' % self.forward_speed)
+        motions = {'w': (self.forward_speed, 0., 0.), 's': (-.15, 0., 0.),
+                   'a': (0., .15, 0.), 'd': (0., -.15, 0.),
+                   'q': (0., 0., .35), 'e': (0., 0., -.35)}
+        self.velocity = motions.get(key, (0., 0., 0.))
+        self.until = now + .4
+        if key in ('1', '2', '3'):
+            self.pending_mode = int(key)
+            self.mode_until = now + 1.
+        elif key == 'b':
+            self.start.publish(Bool(data=True))
+            self.get_logger().info('FAST-LIO start requested; remain stationary until IMU Initial Done')
+
+    def tick(self):
+        now = time.monotonic()
+        fresh = now - self.last_clock < 2.
+        msg = Twist()
+        if fresh and now < self.until:
+            msg.linear.x, msg.linear.y, msg.angular.z = self.velocity
+        self.pub.publish(msg)
+        if fresh and now < self.mode_until:
+            self.mode.publish(Int32(data=self.pending_mode))
+
+
+def main():
+    if not sys.stdin.isatty():
+        raise SystemExit('Run in a dedicated interactive terminal')
+    rclpy.init()
+    node = Keyboard()
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    print('SIMULATION ONLY | 2: down, then 2: stand (wait between presses)\n'
+          'b: start LIO after stable stand | 3: RL walking | 1: passive\n'
+          'Hold w/s: forward/back; a/d: strafe; q/e: turn\n'
+          'g: low 0.25 m/s (default; stairs/corners) | f: medium 0.40 m/s\n'
+          'h: high 0.60 m/s (clear flat ground only); switching gears stops motion\n'
+          'Space/x: zero velocity | release: zero after 0.4s | Ctrl+C: zero and exit', flush=True)
+    try:
+        tty.setcbreak(fd)
+        while rclpy.ok():
+            rclpy.spin_once(node, timeout_sec=0.)
+            if select.select([fd], [], [], .05)[0]:
+                node.key(os.read(fd, 1).decode().lower())
+            node.tick()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        for _ in range(5):
+            node.pub.publish(Twist())
+            time.sleep(.02)
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()

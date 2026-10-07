@@ -1,0 +1,131 @@
+#!/usr/bin/python3
+"""Bounded XYZ PCD chunks from registered scans; no localization feedback."""
+import json
+import os
+from pathlib import Path
+import shutil
+from datetime import datetime
+import numpy as np
+import rclpy
+from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
+from sensor_msgs.msg import PointCloud2
+from sensor_msgs_py import point_cloud2
+from std_srvs.srv import Trigger
+
+
+class Recorder(Node):
+    def __init__(self):
+        super().__init__('mapping_pcd_recorder')
+        root = Path(self.declare_parameter('output_root', 'data/lio_maps').value).expanduser()
+        self.limit = int(self.declare_parameter('chunk_points', 200000).value)
+        self.period = float(self.declare_parameter('sample_period', 0.5).value)
+        self.reserve = int(self.declare_parameter('min_free_bytes', 2 * 1024**3).value)
+        if self.limit < 1 or self.period < 0 or self.reserve < 0:
+            raise ValueError('Invalid recorder limits')
+        self.directory = root / (datetime.now().strftime('%Y%m%d_%H%M%S_%f') + '_%d' % os.getpid())
+        self.directory.mkdir(parents=True, exist_ok=False)
+        self.buffer = np.empty((self.limit, 3), dtype='<f4')
+        self.count = 0
+        self.frame = None
+        self.last_stamp = None
+        self.failed = False
+        self.chunks = []
+        self.create_subscription(PointCloud2, '/fast_lio/cloud_registered', self.receive,
+                                 qos_profile_sensor_data)
+        self.create_service(Trigger, '/mapping/flush', self.save_request)
+        self.get_logger().info('PCD directory: %s; chunk=%d points, sampling=%.2fs' %
+                               (self.directory, self.limit, self.period))
+
+    def receive(self, msg):
+        if self.failed:
+            return
+        stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        try:
+            if not msg.header.frame_id:
+                raise ValueError('Empty point-cloud frame')
+            if self.frame is not None and self.frame != msg.header.frame_id:
+                raise ValueError('Frame changed; refusing to mix coordinate systems')
+            if self.last_stamp is not None:
+                if stamp < self.last_stamp:
+                    raise ValueError('Simulation time reset; start a new mapping session')
+                if stamp - self.last_stamp < self.period:
+                    return
+            self.frame = msg.header.frame_id
+            xyz = point_cloud2.read_points_numpy(msg, field_names=('x', 'y', 'z'),
+                                                skip_nans=False).reshape(-1, 3)
+            xyz = xyz[np.isfinite(xyz).all(axis=1)]
+            self.last_stamp = stamp
+            offset = 0
+            while offset < len(xyz):
+                take = min(self.limit - self.count, len(xyz) - offset)
+                self.buffer[self.count:self.count + take] = xyz[offset:offset + take]
+                self.count += take
+                offset += take
+                if self.count == self.limit:
+                    self.flush()
+        except Exception as exc:
+            self.failed = True
+            self.get_logger().error('Recording stopped (navigation unchanged): %s' % exc)
+
+    def flush(self):
+        if not self.count:
+            return
+        if shutil.disk_usage(self.directory).free < self.reserve + self.count * 12 + 4096:
+            raise OSError('Insufficient disk space; pending points retained in RAM')
+        name = 'chunk_%05d.pcd' % (len(self.chunks) + 1)
+        target = self.directory / name
+        header = ('# .PCD v0.7\nVERSION 0.7\nFIELDS x y z\nSIZE 4 4 4\n'
+                  'TYPE F F F\nCOUNT 1 1 1\nWIDTH %d\nHEIGHT 1\n'
+                  'VIEWPOINT 0 0 0 1 0 0 0\nPOINTS %d\nDATA binary\n') % (self.count, self.count)
+        with target.with_suffix('.pcd.tmp').open('wb') as stream:
+            stream.write(header.encode('ascii'))
+            self.buffer[:self.count].tofile(stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(target.with_suffix('.pcd.tmp'), target)
+        self.chunks.append({'file': name, 'points': self.count, 'last_scan_stamp': self.last_stamp})
+        self.count = 0
+        manifest = {'frame_id': self.frame, 'source': '/fast_lio/cloud_registered',
+                    'sample_period': self.period, 'chunks': self.chunks,
+                    'note': 'One continuous LIO session; no loop closure or global leveling.'}
+        temp = self.directory / 'manifest.json.tmp'
+        temp.write_text(json.dumps(manifest, indent=2) + '\n')
+        os.replace(temp, self.directory / 'manifest.json')
+        message = 'Saved %s (%d points)' % (name, self.chunks[-1]['points'])
+        if rclpy.ok():
+            self.get_logger().info(message)
+        else:
+            print(message, flush=True)
+
+    def save_request(self, request, response):
+        try:
+            self.flush()
+            response.success = not self.failed
+            response.message = str(self.directory) + ('; recorder halted, check log' if self.failed else '; saved; recording continues')
+        except Exception as exc:
+            self.failed = True
+            response.success = False
+            response.message = str(exc)
+        return response
+
+
+def main():
+    rclpy.init()
+    node = Recorder()
+    try:
+        rclpy.spin(node)
+    except (KeyboardInterrupt, rclpy.executors.ExternalShutdownException):
+        pass
+    finally:
+        try:
+            node.flush()
+        except Exception as exc:
+            print('FINAL PCD SAVE FAILED: %s' % exc, flush=True)
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()
