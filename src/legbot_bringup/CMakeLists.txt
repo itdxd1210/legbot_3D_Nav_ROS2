@@ -10,6 +10,11 @@ ament_target_dependencies(${n} legbot_runtime tf2_sensor_msgs)
 install(TARGETS ${n} DESTINATION lib/${PROJECT_NAME})
 endforeach()
 install(PROGRAMS
+  scripts/initial_localization_bridge
+  scripts/initial_localization_probe
+  scripts/initial_localization_truth
+  scripts/localization_navigation_bridge
+  scripts/localization_comparison
   scripts/mapping_map_viewer
   scripts/mapping_pcd_recorder
   scripts/go2_mapping_keyboard
@@ -20,6 +25,8 @@ install(PROGRAMS
   scripts/fastlio_truth_monitor
   scripts/scan_waypoint_mission
   scripts/stair_cloud_sim
+  DESTINATION lib/${PROJECT_NAME})
+install(FILES scripts/initial_localization_common.py scripts/initial_localization_search.py
   DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY launch config models worlds rviz DESTINATION share/${PROJECT_NAME}
   PATTERN "__pycache__" EXCLUDE

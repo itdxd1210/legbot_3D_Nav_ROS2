@@ -33,6 +33,7 @@ def generate_launch_description():
     actions.append(DeclareLaunchArgument('min_walk_speed', default_value='0.0'))
     actions.append(DeclareLaunchArgument('goal_slowdown_distance', default_value='0.80'))
     actions.append(DeclareLaunchArgument('max_acc', default_value='0.30'))
+    actions.append(DeclareLaunchArgument('align_reference_height_to_odom', default_value='true', choices=['true', 'false']))
     actions.append(DeclareLaunchArgument('finish_dist', default_value='0.40'))
     actions.append(DeclareLaunchArgument(
         'finish_dist_z', default_value='1.5',
@@ -85,6 +86,7 @@ def generate_launch_description():
             'fsm.navi_mode': ParameterValue(LaunchConfiguration('navi_mode'), value_type=int),
             'fsm.manual_goal_use_message_z': ParameterValue(LaunchConfiguration('manual_goal_use_message_z'), value_type=bool),
             'fsm.odom_twist_in_body_frame': ParameterValue(LaunchConfiguration('odom_twist_in_body_frame'), value_type=bool),
+            'fsm.align_reference_height_to_odom': ParameterValue(LaunchConfiguration('align_reference_height_to_odom'), value_type=bool),
             'fsm.finish_dist': ParameterValue(LaunchConfiguration('finish_dist'), value_type=float),
             'fsm.finish_dist_z': ParameterValue(LaunchConfiguration('finish_dist_z'), value_type=float),
         }], remappings=[

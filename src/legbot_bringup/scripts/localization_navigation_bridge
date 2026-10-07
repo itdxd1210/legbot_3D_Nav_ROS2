@@ -1,0 +1,196 @@
+#!/usr/bin/python3
+"""Opt-in corrected planning frame; never overwrite raw LIO or its TF.
+
+nav_map initially coincides with odom. The fixed PCT route stays in nav_map;
+accepted map matches update nav_map<-odom. All SCAN measurements use nav_map.
+Gazebo is not subscribed here. Initial map placement comes from mission TF.
+"""
+import copy
+import json
+from collections import OrderedDict
+
+import numpy as np
+from scipy.spatial.transform import Rotation
+import rclpy
+from rclpy.node import Node
+from rclpy.qos import QoSProfile, DurabilityPolicy, qos_profile_sensor_data
+from geometry_msgs.msg import PoseWithCovarianceStamped, TransformStamped
+from nav_msgs.msg import Odometry
+from sensor_msgs.msg import PointCloud2, PointField
+from diagnostic_msgs.msg import DiagnosticArray
+from tf2_ros import Buffer, TransformListener, TransformBroadcaster
+
+
+def matrix(p, q):
+    result = np.eye(4)
+    result[:3, :3] = Rotation.from_quat([q.x, q.y, q.z, q.w]).as_matrix()
+    result[:3, 3] = [p.x, p.y, p.z]
+    return result
+
+
+def assign(p, q, transform):
+    p.x, p.y, p.z = map(float, transform[:3, 3])
+    q.x, q.y, q.z, q.w = map(float, Rotation.from_matrix(transform[:3, :3]).as_quat())
+
+
+def transform_cloud(msg, transform):
+    """Preserve fields, padding, organization and byte order; change XYZ only."""
+    out = copy.deepcopy(msg)
+    data = bytearray(msg.data)
+    fields = {f.name: f for f in msg.fields}
+    for name in ('x', 'y', 'z'):
+        if name not in fields or fields[name].datatype != PointField.FLOAT32:
+            raise ValueError('Expected FLOAT32 XYZ')
+    arrays = [np.ndarray((msg.height, msg.width), dtype='>f4' if msg.is_bigendian else '<f4',
+                        buffer=data, offset=fields[k].offset,
+                        strides=(msg.row_step, msg.point_step)) for k in ('x', 'y', 'z')]
+    xyz = np.stack(arrays, axis=-1)
+    xyz = xyz @ transform[:3, :3].T + transform[:3, 3]
+    for i, array in enumerate(arrays):
+        array[:] = xyz[..., i]
+    out.data = bytes(data)
+    out.header.frame_id = 'nav_map'
+    return out
+
+
+class NavigationBridge(Node):
+    def __init__(self):
+        super().__init__('localization_navigation_bridge')
+        # An all-zero pose denotes legacy configuration. Float defaults avoid
+        # Jazzy interpreting an empty array as BYTE_ARRAY instead of DOUBLE_ARRAY.
+        map_from_pct = self.declare_parameter('map_from_pct', [0.0]*7).value
+        if any(map_from_pct):
+            if len(map_from_pct) != 7:
+                raise ValueError('map_from_pct must contain xyz and quaternion xyzw')
+            native_pct = np.eye(4)
+            native_pct[:3, :3] = Rotation.from_quat(map_from_pct[3:]).as_matrix()
+            native_pct[:3, 3] = map_from_pct[:3]
+            self.pct_map = np.linalg.inv(native_pct)
+        else:
+            with open(self.declare_parameter('map_config', '').value) as f:
+                values = json.load(f)['world_from_pct']
+            world_pct = np.eye(4)
+            world_pct[:3, :3] = Rotation.from_quat(values[3:]).as_matrix()
+            world_pct[:3, 3] = values[:3]
+            with open(self.declare_parameter('alignment_file', '').value) as f:
+                world_map = np.asarray(json.load(f)['trials'][0]['world_from_map'])
+            self.pct_map = np.linalg.inv(world_pct) @ world_map
+        self.nav_map = None
+        self.correction = np.eye(4)
+        self.buffer = Buffer()
+        self.listener = TransformListener(self.buffer, self)
+        self.broadcaster = TransformBroadcaster(self)
+        self.pending = OrderedDict()
+        self.statuses = OrderedDict()
+        self.last_stamp = -1
+        self.last_accept_time = None
+        self.accepted = 0
+        self.dropped = 0
+        latched = QoSProfile(depth=100, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.create_subscription(PoseWithCovarianceStamped, '/pcl_pose', self.matched, latched)
+        self.create_subscription(DiagnosticArray, '/alignment_status', self.status, latched)
+        self.odom_publishers = {}
+        for suffix in ('base', 'lidar'):
+            self.odom_publishers[suffix] = self.create_publisher(Odometry, '/navigation/odometry_' + suffix, 10)
+            self.create_subscription(Odometry, '/fast_lio/odometry_' + suffix,
+                                     lambda msg, s=suffix: self.odom(msg, s), qos_profile_sensor_data)
+        self.cloud_pub = self.create_publisher(PointCloud2, '/navigation/cloud_registered', qos_profile_sensor_data)
+        self.create_subscription(PointCloud2, '/fast_lio/cloud_registered', self.cloud, qos_profile_sensor_data)
+        self.create_timer(0.05, self.update)
+        self.create_timer(5.0, self.report)
+
+    @staticmethod
+    def stamp(msg):
+        return msg.header.stamp.sec * 1000000000 + msg.header.stamp.nanosec
+
+    @staticmethod
+    def trim(queue):
+        while len(queue) > 100:
+            queue.popitem(last=False)
+
+    def matched(self, msg):
+        if msg.header.frame_id == 'localization_probe':
+            self.pending[self.stamp(msg)] = msg
+            self.trim(self.pending)
+
+    def status(self, msg):
+        for status in msg.status:
+            if status.name == 'lidar_localization_ros2/alignment':
+                self.statuses[self.stamp(msg)] = status.message == 'ok'
+        self.trim(self.statuses)
+
+    def update(self):
+        if self.nav_map is None:
+            try:
+                t = self.buffer.lookup_transform('nav_map', 'building_pct', rclpy.time.Time()).transform
+            except Exception:
+                return
+            self.nav_map = matrix(t.translation, t.rotation) @ self.pct_map
+        for stamp, msg in list(self.pending.items()):
+            if self.get_clock().now().nanoseconds - stamp > 2000000000:
+                del self.pending[stamp]
+                self.dropped += 1
+                continue
+            if stamp not in self.statuses:
+                continue
+            if stamp <= self.last_stamp or not self.statuses[stamp]:
+                del self.pending[stamp]
+                continue
+            try:
+                t = self.buffer.lookup_transform('odom', 'base', rclpy.time.Time.from_msg(msg.header.stamp)).transform
+            except Exception:
+                # Exact-time TF only. Never use latest TF or a delta fallback.
+                continue
+            candidate = self.nav_map @ matrix(msg.pose.pose.position, msg.pose.pose.orientation) @ np.linalg.inv(matrix(t.translation, t.rotation))
+            if not np.isfinite(candidate).all():
+                self.dropped += 1
+                del self.pending[stamp]
+                continue
+            self.correction = candidate
+            self.last_stamp = stamp
+            self.last_accept_time = self.get_clock().now()
+            self.accepted += 1
+            del self.pending[stamp]
+
+    def odom(self, msg, suffix):
+        if msg.header.frame_id != 'odom':
+            return
+        out = copy.deepcopy(msg)
+        p = msg.pose.pose
+        assign(out.pose.pose.position, out.pose.pose.orientation,
+               self.correction @ matrix(p.position, p.orientation))
+        # Twist is expressed in child/body frame and must not be rotated.
+        rotation6 = np.zeros((6, 6))
+        rotation6[:3, :3] = rotation6[3:, 3:] = self.correction[:3, :3]
+        covariance = np.asarray(msg.pose.covariance).reshape(6, 6)
+        out.pose.covariance = (rotation6 @ covariance @ rotation6.T).ravel().tolist()
+        out.header.frame_id = 'nav_map'
+        if suffix == 'base':
+            tf = TransformStamped()
+            tf.header = copy.deepcopy(out.header)
+            tf.child_frame_id = 'odom'
+            assign(tf.transform.translation, tf.transform.rotation, self.correction)
+            self.broadcaster.sendTransform(tf)
+        self.odom_publishers[suffix].publish(out)
+
+    def cloud(self, msg):
+        if msg.header.frame_id == 'odom':
+            self.cloud_pub.publish(transform_cloud(msg, self.correction))
+
+    def report(self):
+        age = -1.0 if self.last_accept_time is None else (self.get_clock().now() - self.last_accept_time).nanoseconds * 1e-9
+        self.get_logger().info('NAV_CORRECTION accepted=%d invalid=%d age=%.2fs translation=%s; stale matching holds last transform, LIO continues' %
+                               (self.accepted, self.dropped, age, np.round(self.correction[:3, 3], 4).tolist()))
+
+
+if __name__ == '__main__':
+    rclpy.init()
+    node = NavigationBridge()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()

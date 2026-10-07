@@ -11,6 +11,8 @@ licenses remain in force and are not replaced by the root license.
 | EGO planner port | `src/ego_planner` | Original upstream terms apply |
 | PCT planner | `src/pct_planner` | GPL-2.0; license retained in package |
 | FAST-LIO | `src/fast_lio` | GPL-2.0; license retained in package |
+| LiDAR localization | `src/localization/lidar_localization_ros2` | BSD-2-Clause; package LICENSE retained |
+| OpenMP NDT | `src/localization/ndt_omp_ros2` | BSD-2-Clause; package LICENSE retained |
 | SCAN-Planner port | `src/scan_planner` | Apache-2.0; license retained in package |
 | GO2 ROS/controller code | `src/go2_description`, `src/rl_quadruped_controller` | BSD-3-Clause upstream terms |
 | Unitree SDK2 interface | `src/hardware_unitree_sdk2`, `third_party/unitree_sdk2` | Upstream terms retained |
@@ -20,6 +22,9 @@ licenses remain in force and are not replaced by the root license.
 
 The root Apache-2.0 license applies to the original integration code. Bundled
 components remain subject to their corresponding upstream terms.
+
+The localization repositories' pinned revisions and local integration changes
+are recorded in [src/localization/UPSTREAM.md](src/localization/UPSTREAM.md).
 
 ## Jazzy/GO2 integration
 

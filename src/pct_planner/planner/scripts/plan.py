@@ -5,12 +5,12 @@ import numpy as np
 import rclpy
 from rclpy.executors import ExternalShutdownException
 from rclpy.utilities import remove_ros_args
-from rclpy.qos import QoSProfile, DurabilityPolicy
+from rclpy.qos import QoSProfile, DurabilityPolicy, qos_profile_sensor_data
 from rclpy.time import Time
 from tf2_ros import Buffer, TransformListener
 rclpy.init()
 node = rclpy.create_node('pct_planner')
-from nav_msgs.msg import Path
+from nav_msgs.msg import Path, Odometry
 from sensor_msgs.msg import PointCloud2, PointField
 import sensor_msgs_py.point_cloud2 as pc2
 from std_msgs.msg import Header
@@ -32,6 +32,11 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--scene', type=str, default='Go2', help='Name of the scene. Available: [\'Spiral\', \'Building\', \'Plaza\']')
 parser.add_argument('--tomogram', type=str, default='', help='Tomogram basename without .pickle')
 parser.add_argument('--start', type=float, nargs=3, metavar=('X', 'Y', 'Z'))
+parser.add_argument('--start-mode', choices=('fixed', 'current'), default='fixed')
+parser.add_argument('--start-pose-topic', default='')
+parser.add_argument('--start-pose-frame', default='initial_map')
+parser.add_argument('--map-from-pct', type=float, nargs=7,
+                    help='Saved map <- PCT rigid transform: xyz quaternion xyzw')
 parser.add_argument('--goal', type=float, nargs=3, metavar=('X', 'Y', 'Z'))
 parser.add_argument('--path-topic', default='/pct_path')
 parser.add_argument('--frame-id', default='building_pct')
@@ -40,6 +45,13 @@ parser.add_argument('--display-frame', default='',
 parser.add_argument('--optimize', action='store_true',
                     help='Use experimental GPMP optimization instead of the stable PCT A* route')
 args = parser.parse_args(remove_ros_args(sys.argv)[1:])
+if args.start_mode == 'current':
+    if not args.start_pose_topic or args.map_from_pct is None or args.start is not None:
+        parser.error('current start requires pose topic/map_from_pct and forbids --start fallback')
+    transform = np.asarray(args.map_from_pct)
+    if (not np.isfinite(transform).all()
+            or abs(np.linalg.norm(transform[3:]) - 1.) > 1e-3):
+        parser.error('--map-from-pct must be finite with a normalized quaternion')
 
 display_frame = args.display_frame or args.frame_id
 display_tf_buffer = Buffer(node=node) if display_frame != args.frame_id else None
@@ -57,9 +69,11 @@ default_tomogram, default_start, default_goal = scene_defaults.get(
     args.scene, (args.tomogram, args.start, args.goal)
 )
 tomo_file = args.tomogram or default_tomogram
-start_pos = np.asarray(args.start or default_start, dtype=np.float32)
+start_pos = (np.asarray(args.start or default_start, dtype=np.float32)
+             if args.start_mode == 'fixed' else None)
 end_pos = np.asarray(args.goal or default_goal, dtype=np.float32)
-if not np.isfinite(start_pos).all() or not np.isfinite(end_pos).all():
+if ((start_pos is not None and not np.isfinite(start_pos).all())
+        or not np.isfinite(end_pos).all()):
     parser.error('--start and --goal must contain finite coordinates')
 
 path_pub = node.create_publisher(
@@ -84,6 +98,55 @@ plan_timer = None
 cloud_timer = None
 map_cloud_messages = None
 PLAN_INTERVAL = 0.5  # 规划检查间隔（秒）
+current_start_msg = None
+current_plan_failed = False
+
+
+def pct_start_from_odometry(msg, map_from_pct, expected_frame, now):
+    """Accepted current base pose -> PCT coordinates; no height adjustment."""
+    if msg.header.frame_id != expected_frame or msg.child_frame_id != 'base':
+        raise ValueError('Expected accepted map-frame base odometry')
+    stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+    if not 0. <= now - stamp <= 0.5:
+        raise ValueError('Current base pose is stale or future-dated')
+    p, q = msg.pose.pose.position, msg.pose.pose.orientation
+    values = np.asarray([p.x, p.y, p.z, q.x, q.y, q.z, q.w])
+    if not np.isfinite(values).all() or not 0.5 <= np.linalg.norm(values[3:]) <= 1.5:
+        raise ValueError('Invalid current base pose')
+    tx, ty, tz, x, y, z, w = map_from_pct
+    rotation = np.array([
+        [1-2*(y*y+z*z), 2*(x*y-z*w), 2*(x*z+y*w)],
+        [2*(x*y+z*w), 1-2*(x*x+z*z), 2*(y*z-x*w)],
+        [2*(x*z-y*w), 2*(y*z+x*w), 1-2*(x*x+y*y)],
+    ])
+    return rotation.T @ (values[:3] - [tx, ty, tz])
+
+
+def check_current_start_terrain(candidate, planner):
+    """Reject uncovered starts before the existing layer selector/search."""
+    index = planner.pos2idx(candidate[:2])
+    # pos2idx returns [column, row]; stored grids use [row, column].
+    if np.any(index < 0) or np.any(index >= np.asarray(planner.map_dim)[::-1]):
+        raise ValueError('Current PCT start is outside the Tomogram')
+    layer = planner.match_best_layer(*candidate)
+    column, row = index.astype(int)
+    ground = planner.layer_elev_grids[layer, row, column]
+    cost = planner.tomogram[0, layer, row, column]
+    if (not np.isfinite(ground) or ground <= -99. or not np.isfinite(cost) or cost <= 0.
+            or abs(ground-candidate[2]) > planner.slice_dh):
+        raise ValueError('Current PCT start has no height-compatible mapped terrain')
+
+
+def on_current_start(msg):
+    global current_start_msg
+    if start_pos is not None or current_plan_failed:
+        return
+    try:
+        pct_start_from_odometry(msg, args.map_from_pct, args.start_pose_frame,
+                                node.get_clock().now().nanoseconds * 1e-9)
+    except ValueError:
+        return
+    current_start_msg = msg
 
 
 def publish_map_clouds():
@@ -172,6 +235,30 @@ def publish_clouds_when_rviz_is_ready():
 def plan_callback():  # 关键修改：添加event参数接收TimerEvent
     """定时器回调函数：执行路径规划并发布"""
     global last_planned_end_pos, last_planned_start_pos,end_pos, start_pos, plan_timer
+    global current_plan_failed
+    if args.start_mode == 'current':
+        if current_plan_failed:
+            return
+        if start_pos is None:
+            if current_start_msg is None:
+                return
+            try:
+                candidate = pct_start_from_odometry(
+                    current_start_msg, args.map_from_pct, args.start_pose_frame,
+                    node.get_clock().now().nanoseconds * 1e-9)
+            except ValueError:
+                return  # Wait for the next fresh accepted pose, never a default start.
+            try:
+                check_current_start_terrain(candidate, planner)
+            except ValueError as exc:
+                current_plan_failed = True
+                node.get_logger().error('PCT_START_REJECTED: %s; navigation remains blocked' % exc)
+                return
+            start_pos = candidate.astype(np.float32)
+            node.get_logger().info('PCT_START_SELECTED mode=current frame=%s xyz=%s' %
+                                   (args.frame_id, start_pos.tolist()))
+            # Once selected, keep this mission's start fixed, not moving with odometry.
+            make6DofMarker(start_pos, 'start_pos', show_6dof=False)
 
     # 检查位置是否发生变化（考虑浮点数精度）
     position_changed = True
@@ -194,8 +281,16 @@ def plan_callback():  # 关键修改：添加event参数接收TimerEvent
                     flush=True)
                 last_planned_start_pos = start_pos.copy()  # 更新上次规划位置
                 last_planned_end_pos = end_pos.copy()  # 更新上次规划位置
+            elif args.start_mode == 'current':
+                current_plan_failed = True
+                node.get_logger().error('PCT_PLAN_FAILED: no route from current start; no fixed-start fallback')
         except KeyboardInterrupt:
             print("路径发布失败")
+        except Exception as exc:
+            if args.start_mode != 'current':
+                raise
+            current_plan_failed = True
+            node.get_logger().error('PCT_PLAN_FAILED: %s; navigation remains blocked' % exc)
     
     # 重新启动定时器（实现周期性检查）
     # Repeating ROS 2 timer is created once in pct_plan().
@@ -207,6 +302,8 @@ def processFeedback(feedback):
     p = feedback.pose.position
     # 更新目标位置
     if feedback.marker_name=="start_pos":
+        if args.start_mode == 'current':
+            return
         start_pos = np.array([p.x, p.y, p.z-0.5], dtype=np.float32)
     elif feedback.marker_name=="end_pos":
         end_pos = np.array([p.x, p.y, p.z-0.5], dtype=np.float32)
@@ -336,7 +433,13 @@ def pct_plan():
     # RViz and that TF are ready, without streaming large static clouds.
     cloud_timer = node.create_timer(0.5, publish_clouds_when_rviz_is_ready)
 
-    make6DofMarker(start_pos,"start_pos", show_6dof=True)
+    if args.start_mode == 'fixed':
+        make6DofMarker(start_pos,"start_pos", show_6dof=True)
+    else:
+        node.create_subscription(Odometry, args.start_pose_topic, on_current_start,
+                                 qos_profile_sensor_data)
+        node.get_logger().info('PCT_WAIT_CURRENT_START: waiting for accepted localization on %s' %
+                               args.start_pose_topic)
     make6DofMarker(end_pos, "end_pos",show_6dof=True)
     
     # print("初始目标位置", end_pos)

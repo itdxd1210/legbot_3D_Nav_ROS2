@@ -1,0 +1,122 @@
+#!/usr/bin/python3
+"""Accepted scan-only initial pose -> map odometry and optional matching seed.
+
+No truth/spawn input, no TF ownership, no motion commands. Until admission,
+publish nothing so the PCT mission cannot start using an unknown map pose.
+"""
+import copy
+import json
+from collections import deque
+from pathlib import Path
+import sys
+import numpy as np
+from scipy.spatial.transform import Rotation
+import rclpy
+from rclpy.node import Node
+from rclpy.qos import QoSProfile, DurabilityPolicy, qos_profile_sensor_data
+from rclpy.executors import ExternalShutdownException
+from std_msgs.msg import String
+from nav_msgs.msg import Odometry
+from geometry_msgs.msg import PoseWithCovarianceStamped
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from initial_localization_common import pose_matrix, accepted_map_odom
+
+
+class InitialBridge(Node):
+    def __init__(self):
+        super().__init__('initial_localization_bridge')
+        self.map_frame = self.declare_parameter('map_frame', 'initial_map').value
+        self.seed_matching = self.declare_parameter('seed_map_matching', False).value
+        self.history = deque(maxlen=1000)
+        self.map_odom = None
+        self.result = None
+        self.seeded = False
+        self.pose_pub = self.create_publisher(Odometry, '/initial_localization/odometry_base', 10)
+        self.seed_pub = self.create_publisher(PoseWithCovarianceStamped, '/initialpose', 10) if self.seed_matching else None
+        self.create_subscription(Odometry, '/fast_lio/odometry_base', self.on_odom, qos_profile_sensor_data)
+        self.create_subscription(String, '/initial_localization/result', self.on_result,
+            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
+        self.get_logger().info('Waiting for accepted scan-only initialization; no truth input or fallback')
+
+    def on_result(self, msg):
+        if self.map_odom is not None:
+            return
+        try:
+            self.result = json.loads(msg.data)
+        except (ValueError, TypeError):
+            return
+        if not isinstance(self.result, dict):
+            self.result = None
+            return
+        self.admit()
+
+    def admit(self):
+        if self.result is None or self.map_odom is not None:
+            return
+        try:
+            stamp = float(self.result.get('stamp_s', -1e9))
+        except (ValueError, TypeError):
+            self.result = None
+            return
+        age = self.get_clock().now().nanoseconds*1e-9-stamp
+        if not np.isfinite(age) or age < -.05 or age > 20:
+            self.result = None
+            self.get_logger().warn('Initial result stale; remain standing and request a fresh scan')
+            return
+        transform, reason = accepted_map_odom(self.result, self.history, self.map_frame)
+        if transform is not None:
+            self.map_odom = transform
+            self.get_logger().info('INITIAL_ADMITTED: map<-odom from scan-only accepted pose')
+        elif reason != 'waiting_synced_odom':
+            self.get_logger().warn('INITIAL_REJECTED: '+reason+'; navigation remains blocked')
+            self.result = None
+
+    def on_odom(self, msg):
+        if msg.header.frame_id != 'odom' or msg.child_frame_id != 'base':
+            return
+        try:
+            odom_base = pose_matrix(msg.pose.pose)
+        except ValueError:
+            return
+        if not np.isfinite(odom_base).all():
+            return
+        self.history.append((msg.header.stamp.sec+msg.header.stamp.nanosec*1e-9, odom_base))
+        self.admit()
+        if self.map_odom is None:
+            return
+        out = copy.deepcopy(msg)
+        pose = self.map_odom @ odom_base
+        p, q = out.pose.pose.position, out.pose.pose.orientation
+        p.x, p.y, p.z = map(float, pose[:3, 3])
+        q.x, q.y, q.z, q.w = map(float, Rotation.from_matrix(pose[:3, :3]).as_quat())
+        rotation6 = np.zeros((6, 6))
+        rotation6[:3, :3] = rotation6[3:, 3:] = self.map_odom[:3, :3]
+        out.pose.covariance = (rotation6 @ np.asarray(msg.pose.covariance).reshape(6, 6) @ rotation6.T).ravel().tolist()
+        out.header.frame_id = self.map_frame
+        self.pose_pub.publish(out)
+        if self.seed_pub is not None and not self.seeded and self.seed_pub.get_subscription_count():
+            seed = PoseWithCovarianceStamped()
+            seed.header = copy.deepcopy(out.header)
+            # The existing matcher uses this different name for native map coordinates.
+            seed.header.frame_id = 'localization_probe'
+            seed.pose = copy.deepcopy(out.pose)
+            for i in (0, 7, 14):
+                seed.pose.covariance[i] = .25**2
+            for i in (21, 28, 35):
+                seed.pose.covariance[i] = np.deg2rad(5)**2
+            self.seed_pub.publish(seed)
+            self.seeded = True
+            self.get_logger().info('INITIAL_SEED: map matching seeded once from scan-only localization')
+
+
+if __name__ == '__main__':
+    rclpy.init()
+    node = InitialBridge()
+    try:
+        rclpy.spin(node)
+    except (KeyboardInterrupt, ExternalShutdownException):
+        pass
+    finally:
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()

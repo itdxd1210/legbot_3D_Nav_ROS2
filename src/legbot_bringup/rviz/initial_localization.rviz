@@ -1,0 +1,90 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+Visualization Manager:
+  Class: ""
+  Global Options:
+    Background Color: 30; 30; 30
+    Fixed Frame: initial_map
+    Frame Rate: 15
+  Displays:
+    - Class: rviz_default_plugins/Axes
+      Name: Native PCD XYZ axes
+      Enabled: true
+      Reference Frame: initial_map
+      Length: 2
+      Radius: 0.03
+    - Class: rviz_default_plugins/Grid
+      Name: Grid
+      Enabled: true
+      Cell Size: 1
+      Plane Cell Count: 100
+    - Class: rviz_default_plugins/PointCloud2
+      Name: Full self-built map (reduced display)
+      Enabled: true
+      Topic:
+        Value: /initial_localization/map
+        Reliability Policy: Reliable
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Depth: 1
+      Position Transformer: XYZ
+      Color Transformer: AxisColor
+      Axis: Z
+      Autocompute Value Bounds: true
+      Use Fixed Frame: true
+      Style: Points
+      Size (Pixels): 2
+      Decay Time: 0
+    - Class: rviz_default_plugins/PoseArray
+      Name: Global search candidates
+      Enabled: true
+      Topic:
+        Value: /initial_localization/candidates
+        Reliability Policy: Reliable
+        Durability Policy: Transient Local
+        Depth: 1
+      Color: 255; 180; 20
+      Shape: Arrow (Flat)
+      Arrow Length: 1
+    - Class: rviz_default_plugins/Pose
+      Name: Algorithm best candidate (not navigation)
+      Enabled: true
+      Topic:
+        Value: /initial_localization/best_pose
+        Reliability Policy: Reliable
+        Durability Policy: Transient Local
+        Depth: 1
+      Shape: Axes
+      Axes Length: 2
+      Axes Radius: 0.05
+    - Class: rviz_default_plugins/Pose
+      Name: Gazebo truth (validation only)
+      Enabled: true
+      Topic:
+        Value: /initial_localization_truth/pose
+        Reliability Policy: Reliable
+        Durability Policy: Volatile
+        Depth: 1
+      Shape: Arrow
+      Color: 80; 255; 80
+      Shaft Length: 1.5
+      Shaft Radius: 0.08
+      Head Length: 0.3
+      Head Radius: 0.15
+  Tools:
+    - Class: rviz_default_plugins/Interact
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/FocusCamera
+    - Class: rviz_default_plugins/Measure
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 60
+      Pitch: 0.7
+      Yaw: 0.7
+      Focal Point:
+        X: 27
+        Y: -6
+        Z: 0

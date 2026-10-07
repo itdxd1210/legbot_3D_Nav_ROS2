@@ -85,6 +85,8 @@ third_party/  local SDK/runtime installations (not committed)
 | `legbot_bringup` | Launch files, the combined world, adapters, RViz configurations |
 | `go2_description` | GO2 URDF, meshes, ros2_control and policy profiles |
 | `fast_lio` | LiDAR-IMU odometry and registered point clouds |
+| `lidar_localization_ros2` | LiDAR-to-PCD matching; accepted updates feed the navigation bridge |
+| `ndt_omp_ros2` | NDT registration dependency, vendored with provenance |
 | `scan_planner` | Occupancy map, local A*, B-spline planning and GO2 command adapter |
 | `pct_planner` | Tomogram/elevation-map multi-floor global planning |
 | `ego_planner` | Optional EGO local trajectory planner |
@@ -218,3 +220,9 @@ Original integration code is licensed under [Apache License 2.0](LICENSE). Vendo
 ## Acknowledgements
 
 This integration builds on FAST-LIO, SCAN-Planner, EGO-Planner, PCT Planner, Unitree SDK2, Livox SDK/Driver2, `quadruped_ros2_control`, LibTorch, and ONNX Runtime. Upstream revisions and notices are preserved under `docs/`, package license files, and `THIRD_PARTY_NOTICES.md`.
+
+## Mapping and localization workflows
+
+See [mapping](docs/MAPPING_WORKFLOW.md), [localization](docs/LOCALIZATION_WORKFLOW.md),
+and [localization source provenance](src/localization/UPSTREAM.md).
+Personal map data, generated files and experiment logs are not included in Git.

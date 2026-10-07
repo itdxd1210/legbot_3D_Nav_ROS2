@@ -85,6 +85,11 @@ class PctPathMission(Node):
         # A simulator may supply truth; hardware needs its own map localization.
         self.map_pose_topic = str(self.declare_parameter(
             'map_pose_topic', '').value)
+        # Height convention correction in the PCT map frame, before SE(3).
+        self.path_height_offset = float(self.declare_parameter(
+            'path_height_offset', 0.0).value)
+        if not math.isfinite(self.path_height_offset):
+            raise ValueError('path_height_offset must be finite')
         self.max_alignment_dt = float(self.declare_parameter(
             'max_alignment_dt', 0.05).value)
         if self.max_alignment_dt <= 0.0:
@@ -103,6 +108,16 @@ class PctPathMission(Node):
             float(self.declare_parameter('building_z', 0.0).value),
             float(self.declare_parameter('building_yaw', 0.0).value),
         )
+        # Map-pose-frame-from-PCT: Gazebo world in legacy mode, native saved
+        # map in scan-only initialization. The same full SE(3) composition applies.
+        self.world_from_pct = tuple(self.declare_parameter(
+            'world_from_pct', list(yaw_pose(*self.building))).value)
+        if (len(self.world_from_pct) != 7 or
+                not all(math.isfinite(v) for v in self.world_from_pct)):
+            raise ValueError('world_from_pct must contain xyz and quaternion xyzw')
+        qnorm = math.sqrt(sum(v*v for v in self.world_from_pct[3:]))
+        if abs(qnorm - 1.0) > 1e-3:
+            raise ValueError('world_from_pct quaternion must be normalized')
         self.spawn = (
             float(self.declare_parameter('spawn_x', -27.0).value),
             float(self.declare_parameter('spawn_y', 6.0).value),
@@ -215,7 +230,7 @@ class PctPathMission(Node):
         odom_from_map = compose_pose(
             odom_from_base, inverse_pose(map_from_base))
         self.odom_from_building = compose_pose(
-            odom_from_map, yaw_pose(*self.building))
+            odom_from_map, self.world_from_pct)
 
         stamp = self.get_clock().now().to_msg()
         self.publish_map_transform(stamp)
@@ -227,7 +242,7 @@ class PctPathMission(Node):
             local = (
                 source.pose.position.x,
                 source.pose.position.y,
-                source.pose.position.z,
+                source.pose.position.z + self.path_height_offset,
             )
             points.append(transform_xyz(local, self.odom_from_building))
 

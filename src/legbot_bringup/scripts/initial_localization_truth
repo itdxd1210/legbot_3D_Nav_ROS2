@@ -1,0 +1,90 @@
+#!/usr/bin/python3
+"""Independent truth observer. Never supplies poses to the search or navigation."""
+from collections import deque
+import json
+import math
+from pathlib import Path
+import sys
+import numpy as np
+from scipy.spatial.transform import Rotation
+import rclpy
+from rclpy.node import Node
+from rclpy.qos import QoSProfile, DurabilityPolicy, qos_profile_sensor_data
+from rclpy.executors import ExternalShutdownException
+from geometry_msgs.msg import PoseStamped
+from nav_msgs.msg import Odometry
+from std_msgs.msg import String
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from initial_localization_common import pose_matrix
+
+
+class TruthObserver(Node):
+    def __init__(self):
+        super().__init__('initial_localization_truth')
+        alignment = json.loads(Path(self.declare_parameter('alignment_file', '').value).read_text())
+        self.world_from_map = np.asarray(alignment['selected']['world_from_map'])
+        self.history = deque(maxlen=15000)
+        qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.pub = self.create_publisher(String, '~/result', qos)
+        self.pose_pub = self.create_publisher(PoseStamped, '~/pose', 1)
+        self.create_subscription(Odometry, '/Odometry_gazebo', self.on_truth, qos_profile_sensor_data)
+        self.create_subscription(String, '/initial_localization/result', self.on_result, qos)
+        self.get_logger().info('Truth observer only: no /initialpose, map->odom TF or command publishers')
+
+    def on_truth(self, msg):
+        self.history.append((msg.header.stamp.sec + msg.header.stamp.nanosec*1e-9, pose_matrix(msg.pose.pose)))
+        matrix = np.linalg.inv(self.world_from_map) @ self.history[-1][1]
+        pose = PoseStamped()
+        pose.header.stamp = msg.header.stamp
+        pose.header.frame_id = 'initial_map'
+        pose.pose.position.x, pose.pose.position.y, pose.pose.position.z = map(float, matrix[:3, 3])
+        q = Rotation.from_matrix(matrix[:3, :3]).as_quat()
+        pose.pose.orientation.x, pose.pose.orientation.y, pose.pose.orientation.z, pose.pose.orientation.w = map(float, q)
+        self.pose_pub.publish(pose)
+
+    def on_result(self, msg):
+        result = json.loads(msg.data)
+        if 'map_from_base' not in result:
+            self.get_logger().warn('No pose to verify: ' + result['decision'])
+            return
+        if not self.history:
+            self.get_logger().warn('No truth received; cannot verify')
+            return
+        stamp, truth = min(self.history, key=lambda item: abs(item[0]-result['stamp_s']))
+        dt = abs(stamp-result['stamp_s'])
+        if dt > .05:
+            self.get_logger().warn('No synchronized truth; time gap %.3fs' % dt)
+            return
+        estimate = self.world_from_map @ np.asarray(result['map_from_base'])
+        difference = estimate[:3, 3] - truth[:3, 3]
+        yaw = lambda m: math.atan2(m[1, 0], m[0, 0])
+        yaw_error = math.degrees(math.atan2(math.sin(yaw(estimate)-yaw(truth)), math.cos(yaw(estimate)-yaw(truth))))
+        angle = math.degrees(Rotation.from_matrix(truth[:3, :3].T @ estimate[:3, :3]).magnitude())
+        xy = float(np.linalg.norm(difference[:2]))
+        passed = (result['decision'] == 'candidate_passed_review' and xy <= .25
+                  and abs(difference[2]) <= .15 and abs(yaw_error) <= 5 and angle <= 5)
+        report = {'verified_pass': bool(passed), 'decision': result['decision'],
+                  'xy_error_m': xy, 'z_error_m': float(difference[2]),
+                  'yaw_error_deg': yaw_error, 'rotation_error_deg': angle,
+                  'sync_dt_s': dt, 'runtime_wall_s': result['runtime_wall_s'],
+                  'estimated_world_xyz': estimate[:3, 3].tolist(), 'truth_world_xyz': truth[:3, 3].tolist(),
+                  'validation_uses_existing_map_world_alignment': True}
+        self.pub.publish(String(data=json.dumps(report)))
+        self.get_logger().info('TRUTH_CHECK ' + json.dumps(report))
+
+
+def main():
+    rclpy.init()
+    node = TruthObserver()
+    try:
+        rclpy.spin(node)
+    except (KeyboardInterrupt, ExternalShutdownException):
+        pass
+    finally:
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()

@@ -9,6 +9,9 @@
 <depend>sensor_msgs</depend>
 <exec_depend>sensor_msgs_py</exec_depend>
 <exec_depend>python3-numpy</exec_depend>
+<exec_depend>diagnostic_msgs</exec_depend>
+<exec_depend>python3-scipy</exec_depend>
+<exec_depend>rosgraph_msgs</exec_depend>
 <depend>visualization_msgs</depend>
 <depend>tf2</depend>
 <depend>tf2_ros</depend>
@@ -29,4 +32,5 @@
 <depend>control_input_msgs</depend>
 <depend>tf2_sensor_msgs</depend>
 <exec_depend>pct_planner</exec_depend><exec_depend>scan_planner</exec_depend><exec_depend>ego_planner</exec_depend><exec_depend>fast_lio</exec_depend><exec_depend>gz_quadruped_hardware</exec_depend><exec_depend>rl_quadruped_controller</exec_depend>
+<exec_depend>lidar_localization_ros2</exec_depend>
 <export><build_type>ament_cmake</build_type></export></package>

@@ -15,9 +15,10 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument('use_sim_time', default_value='true', choices=['true', 'false']),
         DeclareLaunchArgument('config', default_value=default_config),
+        DeclareLaunchArgument('fixed_frame', default_value='odom'),
         Node(
             package='rviz2', executable='rviz2', name='scan_rviz', output='screen',
-            arguments=['-d', LaunchConfiguration('config')],
+            arguments=['-d', LaunchConfiguration('config'), '-f', LaunchConfiguration('fixed_frame')],
             parameters=[{'use_sim_time': ParameterValue(
                 LaunchConfiguration('use_sim_time'), value_type=bool)}]),
     ])

@@ -23,6 +23,7 @@ for path in sorted(Path('src/legbot_bringup/launch').glob('*.launch.py')):
             (item.name for item in Path('/sys/class/net').iterdir() if item.name != 'lo'),
             'test_eth0')
     if path.name == 'view_mapping.launch.py':
+        # Required user argument: only evaluate substitutions, never load a map.
         context.launch_configurations['map_directory'] = str(Path('data').resolve())
     actions = list(description.entities)
     # setup only constructs actions: never call execute() on a Node or include.
@@ -151,7 +152,9 @@ for path in sorted(Path('src/legbot_bringup/launch').glob('*.launch.py')):
         assert "'config': rviz_config" in source
         assert "'scan_stairs_demo.rviz'" in source
         assert "'finish_dist': '0.50'" in source
-        assert "'frame_id': 'odom'" in source
+        assert any(
+            item.get('frame_id') == 'odom'
+            for item in bridge_parameters if isinstance(item, dict))
         rviz_source = Path('src/legbot_bringup/rviz/scan_stairs_demo.rviz').read_text()
         assert 'Description Source: Topic' in rviz_source
         assert 'Value: /go2/robot_description' in rviz_source

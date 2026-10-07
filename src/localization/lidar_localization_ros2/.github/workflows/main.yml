@@ -1,0 +1,105 @@
+name: build
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint (ruff + shellcheck)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install ruff
+        run: pip install "ruff==0.16.8"
+      - name: Ruff check
+        run: ruff check scripts test
+      - name: Ruff format check
+        run: ruff format --check scripts test
+      - name: ShellCheck
+        run: shellcheck scripts/*.sh
+
+  humble_build:
+    name: Build on Humble
+    runs-on: ubuntu-22.04
+    container: ros:humble
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - name: Copy repository
+        run: |
+          mkdir -p ~/ros2_ws/src/lidar_localization_ros2
+          cp -rf . ~/ros2_ws/src/lidar_localization_ros2
+      - name: Install dependencies
+        run: |
+          source /opt/ros/humble/setup.bash
+          sudo apt-get update
+          sudo apt-get install -y python3-rosdep python3-colcon-common-extensions
+          rosdep update
+          cd ~/ros2_ws/src
+          git clone https://github.com/rsasaki0109/ndt_omp_ros2.git -b humble
+          rosdep install -r -y --from-paths . --ignore-src
+        shell: bash
+      - name: Build packages
+        run: |
+          source /opt/ros/humble/setup.bash
+          cd ~/ros2_ws
+          colcon build
+          source ~/ros2_ws/install/setup.bash
+        shell: bash
+
+  jazzy_build:
+    name: Build on Jazzy
+    runs-on: ubuntu-24.04
+    container: ros:jazzy
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - name: Copy repository
+        run: |
+          mkdir -p ~/ros2_ws/src/lidar_localization_ros2
+          cp -rf . ~/ros2_ws/src/lidar_localization_ros2
+      - name: Install dependencies
+        run: |
+          source /opt/ros/jazzy/setup.bash
+          sudo apt-get update
+          sudo apt-get install -y python3-rosdep python3-colcon-common-extensions clang-tidy libomp-dev
+          rosdep update
+          cd ~/ros2_ws/src
+          # ndt_omp_ros2 does not publish a dedicated jazzy branch yet; humble is used in CI.
+          git clone https://github.com/rsasaki0109/ndt_omp_ros2.git -b humble
+          rosdep install -r -y --from-paths . --ignore-src
+        shell: bash
+      - name: Build packages
+        run: |
+          source /opt/ros/jazzy/setup.bash
+          cd ~/ros2_ws
+          colcon build --cmake-args -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+          source ~/ros2_ws/install/setup.bash
+        shell: bash
+      - name: Static analysis (clang-tidy on src/)
+        run: |
+          source /opt/ros/jazzy/setup.bash
+          cd ~/ros2_ws
+          python3 - <<'PY' > "${RUNNER_TEMP}/clang_tidy_files.txt"
+          import json
+          with open("build/lidar_localization_ros2/compile_commands.json") as stream:
+              for entry in json.load(stream):
+                  if "/lidar_localization_ros2/src/" in entry["file"]:
+                      print(entry["file"])
+          PY
+          xargs -a "${RUNNER_TEMP}/clang_tidy_files.txt" -P2 -n1 clang-tidy \
+            -p build/lidar_localization_ros2
+        shell: bash

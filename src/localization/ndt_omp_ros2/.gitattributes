@@ -1,0 +1,3 @@
+# Small upstream example fixtures, not personal mapping output.
+# Do not inherit the main workspace's map/policy LFS filter for these files.
+data/*.pcd -filter -diff -merge -text
